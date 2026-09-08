@@ -1,0 +1,12 @@
+bin/
+obj/
+.vs/
+*.user
+node_modules/
+ui/dist/
+ui/.vite/
+*.log
+.DS_Store
+host/bin/
+host/obj/
+cores/

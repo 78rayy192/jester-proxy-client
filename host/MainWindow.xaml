@@ -1,0 +1,25 @@
+﻿<Window x:Class="Jester.Host.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        Title="Jester"
+        Icon="pack://application:,,,/Assets/jester.ico"
+        Width="1280"
+        Height="820"
+        MinWidth="980"
+        MinHeight="640"
+        WindowStartupLocation="CenterScreen"
+        WindowStyle="None"
+        ResizeMode="CanResize"
+        Background="#050505"
+        Foreground="#F5F5F5">
+    <WindowChrome.WindowChrome>
+        <WindowChrome CaptionHeight="0"
+                      ResizeBorderThickness="6"
+                      GlassFrameThickness="0"
+                      CornerRadius="8" />
+    </WindowChrome.WindowChrome>
+    <Border BorderBrush="#22FFFFFF" BorderThickness="1" CornerRadius="8" Background="#050505">
+        <wv2:WebView2 x:Name="Web" DefaultBackgroundColor="#050505" />
+    </Border>
+</Window>
