@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Text;
 using System.Text.Json;
 using YamlDotNet.Serialization;
@@ -11,13 +12,17 @@ public static class SubscriptionNormalizer
         .WithIndentedSequences()
         .Build();
 
+    static readonly IDeserializer YamlIn = new DeserializerBuilder()
+        .IgnoreUnmatchedProperties()
+        .Build();
+
     public static string ToClashYaml(string raw)
     {
         if (string.IsNullOrWhiteSpace(raw))
             throw new InvalidOperationException("Пустая подписка.");
 
         var text = raw.Trim().TrimStart('\uFEFF');
-        if (LooksLikeClash(text)) return text;
+        if (LooksLikeClash(text)) return DecorateYaml(text);
 
         var decoded = TryBase64(text);
         if (decoded != null)
@@ -40,7 +45,7 @@ public static class SubscriptionNormalizer
             try { proxy = ParseShare(uri); }
             catch { continue; }
             if (proxy == null) continue;
-            var name = Unique(proxy["name"].ToString() ?? "node", used);
+            var name = Unique(ServerFlags.Apply(proxy["name"].ToString() ?? "node"), used);
             proxy["name"] = name;
             proxies.Add(proxy);
             names.Add(name);
@@ -48,6 +53,7 @@ public static class SubscriptionNormalizer
 
         if (proxies.Count == 0)
             throw new InvalidOperationException("В ссылке нет поддерживаемых серверов.");
+        RejectNotices(names);
 
         var groups = new List<object>
         {
@@ -75,6 +81,58 @@ public static class SubscriptionNormalizer
             ["rules"] = new List<object> { "MATCH,DIRECT" }
         };
         return Yaml.Serialize(doc);
+    }
+
+    static void RejectNotices(IReadOnlyList<string> names)
+    {
+        if (names.Count == 0 || names.Any(n => !ServerFlags.IsNotice(n))) return;
+        throw new InvalidOperationException(
+            "Поставщик не отдал список серверов. Если указан лимит устройств, удалите неиспользуемое устройство в боте и обновите подписку.");
+    }
+
+    static string DecorateYaml(string yaml)
+    {
+        Dictionary<object, object>? doc;
+        try { doc = YamlIn.Deserialize<Dictionary<object, object>>(yaml); }
+        catch { return yaml; }
+        if (doc == null || !doc.TryGetValue("proxies", out var raw) || raw is not IList list) return yaml;
+
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        var names = new List<string>();
+        foreach (var item in list)
+        {
+            if (item is not IDictionary<object, object> proxy) continue;
+            if (!proxy.TryGetValue("name", out var current) || current is not string old || old.Length == 0) continue;
+            var next = ServerFlags.Apply(old);
+            names.Add(next);
+            if (next == old) continue;
+            proxy["name"] = next;
+            map[old] = next;
+        }
+        RejectNotices(names);
+        if (map.Count > 0) Rewrite(doc, map);
+        return Yaml.Serialize(doc);
+    }
+
+    static void Rewrite(object node, Dictionary<string, string> map)
+    {
+        if (node is IDictionary<object, object> dict)
+        {
+            foreach (var key in dict.Keys.ToList())
+            {
+                if (dict[key] is string s && map.TryGetValue(s, out var next) && !string.Equals(key as string, "name", StringComparison.Ordinal))
+                    dict[key] = next;
+                else Rewrite(dict[key]!, map);
+            }
+        }
+        else if (node is IList list)
+        {
+            for (var i = 0; i < list.Count; i++)
+            {
+                if (list[i] is string s && map.TryGetValue(s, out var next)) list[i] = next;
+                else if (list[i] != null) Rewrite(list[i]!, map);
+            }
+        }
     }
 
     static bool LooksLikeClash(string text)
@@ -123,6 +181,7 @@ public static class SubscriptionNormalizer
             "trojan" => ParseTrojan(uri),
             "ss" => ParseShadowsocks(uri),
             "hysteria2" or "hy2" => ParseHysteria2(uri),
+            "tuic" => ParseTuic(uri),
             _ => null
         };
     }
@@ -184,6 +243,23 @@ public static class SubscriptionNormalizer
         if (q.Get("insecure") is "1" or "true" || LooksLikeIp(uri.Host) || LooksLikeIp(q.Get("sni")))
             proxy["skip-cert-verify"] = true;
         if (q.Get("fp") is { Length: > 0 } fp) proxy["client-fingerprint"] = fp;
+        return proxy;
+    }
+
+    static Dictionary<string, object> ParseTuic(Uri uri)
+    {
+        var q = Query(uri);
+        var proxy = Base("tuic", Name(uri, "TUIC"), uri.Host, uri.Port > 0 ? uri.Port : 443);
+        var user = Uri.UnescapeDataString(uri.UserInfo);
+        var split = user.Split(':', 2);
+        proxy["uuid"] = split[0];
+        if (split.Length == 2) proxy["password"] = split[1];
+        if (q.Get("sni") is { Length: > 0 } sni) proxy["sni"] = sni;
+        if (q.Get("congestion_control") is { Length: > 0 } cc) proxy["congestion-controller"] = cc;
+        if (q.Get("udp_relay_mode") is { Length: > 0 } relay) proxy["udp-relay-mode"] = relay;
+        if (q.Get("alpn") is { Length: > 0 } alpn)
+            proxy["alpn"] = alpn.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Cast<object>().ToList();
+        if (q.Get("insecure") is "1" or "true" || LooksLikeIp(uri.Host)) proxy["skip-cert-verify"] = true;
         return proxy;
     }
 
