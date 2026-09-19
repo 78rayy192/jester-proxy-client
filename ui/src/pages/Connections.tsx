@@ -28,13 +28,13 @@ export function Connections() {
     const s = q.trim().toLowerCase()
     if (!s) return rows
     return rows.filter((c) =>
-      (c.metadata.host || '').toLowerCase().includes(s)
-      || (c.metadata.process || '').toLowerCase().includes(s)
+      (c.metadata?.host || '').toLowerCase().includes(s)
+      || (c.metadata?.process || '').toLowerCase().includes(s)
       || (c.chains || []).join(' ').toLowerCase().includes(s)
       || (c.rulePayload || '').toLowerCase().includes(s))
   }, [rows, q])
 
-  if (!status?.running) return <div className="empty"><h3>{i.connections}</h3><p>Нет активного ядра.</p></div>
+  if (!status?.running) return <div className="empty"><h3>{i.connections}</h3><p>Ядро не запущено.</p></div>
 
   return (
     <div>
@@ -45,17 +45,17 @@ export function Connections() {
         </div>
         <button className="btn danger" onClick={() => clash.closeAll()}>{i.closeAll}</button>
       </div>
-      <input className="search" placeholder="Фильтр: хост, процесс, цепочка" value={q} onChange={(e) => setQ(e.target.value)} style={{ marginBottom: 14 }} />
+      <input className="search" placeholder="Узел, процесс или правило" value={q} onChange={(e) => setQ(e.target.value)} style={{ marginBottom: 14 }} />
       <div className="card" style={{ overflow: 'auto' }}>
         <table className="table">
           <thead>
-            <tr><th>Хост</th><th>Процесс</th><th>Цепочка</th><th>Правило</th><th>↓</th><th>↑</th></tr>
+            <tr><th>Узел</th><th>Процесс</th><th>Маршрут</th><th>Правило</th><th>Входящий</th><th>Исходящий</th></tr>
           </thead>
           <tbody>
             {filtered.map((c) => (
               <tr key={c.id}>
-                <td>{c.metadata.host || c.metadata.destinationIP}</td>
-                <td className="mono">{c.metadata.process || '—'}</td>
+                <td>{c.metadata?.host || c.metadata?.destinationIP || '—'}</td>
+                <td className="mono">{c.metadata?.process || '—'}</td>
                 <td>{(c.chains || []).slice().reverse().join(' → ')}</td>
                 <td>{c.rule} {c.rulePayload}</td>
                 <td className="mono">{formatBytes(c.download)}</td>

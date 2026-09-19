@@ -188,7 +188,7 @@ public sealed class JesterApi : IDisposable
             {
                 if (!_core.Running)
                 {
-                    await WriteJson(ctx, 400, new { error = "Ядро не запущено" });
+                    await WriteJson(ctx, 400, new { error = "Ядро не запущено." });
                     return;
                 }
                 var q = ctx.Request.QueryString;
@@ -207,6 +207,37 @@ public sealed class JesterApi : IDisposable
             case "GET /api/leak-check":
                 await WriteJson(ctx, 200, await _core.LeakCheckAsync());
                 return;
+            case "POST /api/ghost/panic":
+                await WriteJson(ctx, 200, await _core.PhantomPanicAsync());
+                return;
+            case "POST /api/ghost/rush":
+                await WriteJson(ctx, 200, await _core.ActivateRushAsync());
+                return;
+            case "POST /api/ghost/learn":
+                await WriteJson(ctx, 200, await _core.LearnBypassAsync());
+                return;
+            case "POST /api/ports":
+            {
+                var body = await ReadJson<Dictionary<string, JsonElement>>(ctx) ?? new();
+                int Num(string k, int fallback) =>
+                    body.TryGetValue(k, out var v) && v.TryGetInt32(out var n) ? n : fallback;
+                var cur = _settings.Current;
+                var applied = await _core.ApplyPortsAsync(
+                    Num("mixedPort", cur.MixedPort),
+                    Num("socksPort", cur.SocksPort),
+                    Num("externalPort", cur.ExternalPort));
+                await WriteJson(ctx, 200, applied);
+                return;
+            }
+            case "POST /api/window/capture":
+            {
+                var body = await ReadJson<Dictionary<string, JsonElement>>(ctx) ?? new();
+                if (body.TryGetValue("hide", out var h))
+                    _settings.Patch(s => s.HideFromCapture = h.GetBoolean());
+                WindowActions.ApplyCapture?.Invoke();
+                await WriteJson(ctx, 200, new { hide = _settings.Current.HideFromCapture || _settings.Current.StealthMode });
+                return;
+            }
             case "POST /api/window/minimize":
                 WindowActions.Minimize?.Invoke();
                 await WriteJson(ctx, 200, new { ok = true });
@@ -224,20 +255,38 @@ public sealed class JesterApi : IDisposable
         if (path.StartsWith("/api/profiles/") && path.EndsWith("/activate") && method == "POST")
         {
             var id = path["/api/profiles/".Length..^"/activate".Length];
-            if (_profiles.Get(id) == null) { await WriteJson(ctx, 404, new { error = "not found" }); return; }
+            if (!ProfileStore.IsValidId(id) || _profiles.Get(id) == null)
+            {
+                await WriteJson(ctx, 404, new { error = "not found" });
+                return;
+            }
             _settings.Patch(s => s.ActiveProfileId = id);
+            if (_core.Running) await _core.RestartAsync();
             await WriteJson(ctx, 200, _settings.Current);
             return;
         }
         if (path.StartsWith("/api/profiles/") && path.EndsWith("/update") && method == "POST")
         {
             var id = path["/api/profiles/".Length..^"/update".Length];
-            await WriteJson(ctx, 200, await _profiles.UpdateSubscriptionAsync(id));
+            if (!ProfileStore.IsValidId(id))
+            {
+                await WriteJson(ctx, 400, new { error = "bad id" });
+                return;
+            }
+            var updated = await _profiles.UpdateSubscriptionAsync(id);
+            if (_core.Running && _settings.Current.ActiveProfileId == id)
+                await _core.RestartAsync();
+            await WriteJson(ctx, 200, updated);
             return;
         }
         if (path.StartsWith("/api/profiles/") && method == "DELETE")
         {
             var id = path["/api/profiles/".Length..];
+            if (!ProfileStore.IsValidId(id))
+            {
+                await WriteJson(ctx, 400, new { error = "bad id" });
+                return;
+            }
             var active = _settings.Current.ActiveProfileId == id;
             _profiles.Delete(id);
             if (active) _settings.Patch(s => s.ActiveProfileId = "");
@@ -247,6 +296,11 @@ public sealed class JesterApi : IDisposable
         if (path.StartsWith("/api/profiles/") && method == "PUT")
         {
             var id = path["/api/profiles/".Length..];
+            if (!ProfileStore.IsValidId(id))
+            {
+                await WriteJson(ctx, 400, new { error = "bad id" });
+                return;
+            }
             var patch = await ReadJson<Dictionary<string, string>>(ctx) ?? new();
             var name = patch.GetValueOrDefault("name") ?? "";
             await WriteJson(ctx, 200, _profiles.Rename(id, name));
@@ -323,11 +377,14 @@ public sealed class JesterApi : IDisposable
     async Task ServeUi(HttpListenerContext ctx, string path)
     {
         if (path == "/") path = "/index.html";
-        var ui = AppPaths.UiFolder;
-        var full = Path.GetFullPath(Path.Combine(ui, path.TrimStart('/').Replace('/', Path.DirectorySeparatorChar)));
-        if (!full.StartsWith(Path.GetFullPath(ui), StringComparison.OrdinalIgnoreCase) || !File.Exists(full))
+        var uiRoot = Path.GetFullPath(AppPaths.UiFolder);
+        if (!uiRoot.EndsWith(Path.DirectorySeparatorChar))
+            uiRoot += Path.DirectorySeparatorChar;
+        var relative = path.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
+        var full = Path.GetFullPath(Path.Combine(uiRoot, relative));
+        if (!full.StartsWith(uiRoot, StringComparison.OrdinalIgnoreCase) || !File.Exists(full))
         {
-            var index = Path.Combine(ui, "index.html");
+            var index = Path.Combine(uiRoot, "index.html");
             if (File.Exists(index)) full = index;
             else
             {
@@ -405,4 +462,5 @@ public static class WindowActions
     public static Action? ToggleMaximize { get; set; }
     public static Action<bool>? CloseOrTray { get; set; }
     public static Action? Drag { get; set; }
+    public static Action? ApplyCapture { get; set; }
 }

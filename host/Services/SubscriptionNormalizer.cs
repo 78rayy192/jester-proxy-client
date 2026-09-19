@@ -29,7 +29,7 @@ public static class SubscriptionNormalizer
         var uris = ExtractUris(text);
         if (uris.Count == 0)
             throw new InvalidOperationException(
-                "Формат не распознан. Вставьте Clash YAML или ссылку Happ/v2ray (vless, vmess, trojan, ss, hysteria2).");
+                "Формат не распознан. Укажите конфигурацию Clash или ссылку vless, vmess, trojan, ss, hysteria2.");
 
         var proxies = new List<Dictionary<string, object>>();
         var names = new List<string>();
@@ -47,7 +47,7 @@ public static class SubscriptionNormalizer
         }
 
         if (proxies.Count == 0)
-            throw new InvalidOperationException("В ссылке нет узлов, которые умеет mihomo (vless / vmess / trojan / ss / hysteria2).");
+            throw new InvalidOperationException("В ссылке нет поддерживаемых серверов.");
 
         var groups = new List<object>
         {

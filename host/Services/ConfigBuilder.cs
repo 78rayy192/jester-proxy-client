@@ -143,7 +143,7 @@ public static class ConfigBuilder
                 ["use-hosts"] = settings.Dns.UseHosts,
                 ["enhanced-mode"] = "fake-ip",
                 ["fake-ip-range"] = settings.Dns.FakeIpRange,
-                ["fake-ip-filter"] = settings.Dns.FakeIpFilter.Cast<object>().ToList(),
+                ["fake-ip-filter"] = CriticalFakeIpFilter(settings),
                 ["default-nameserver"] = settings.Dns.DefaultNameserver.Cast<object>().ToList(),
                 ["nameserver"] = nameservers,
                 ["fallback"] = fallbacks,
@@ -153,7 +153,8 @@ public static class ConfigBuilder
                 ["fallback-filter"] = new Dictionary<object, object>
                 {
                     ["geoip"] = true,
-                    ["geoip-code"] = "CN",
+                    // Product targets RF users — polluted resolvers return RU ISP poison, not CN.
+                    ["geoip-code"] = "RU",
                     ["ipcidr"] = new List<object> { "240.0.0.0/4", "0.0.0.0/32" }
                 }
             };
@@ -162,7 +163,7 @@ public static class ConfigBuilder
             Set(doc, "dns", dns);
         }
 
-        EnsureProxyGroup(doc, stealth);
+        EnsureProxyGroup(doc, stealth, settings);
         ApplySmartRouting(doc, settings);
 
         return Serializer.Serialize(doc);
@@ -181,21 +182,24 @@ public static class ConfigBuilder
         return server;
     }
 
-    static void EnsureProxyGroup(Dictionary<object, object> doc, bool stealth)
+    static void EnsureProxyGroup(Dictionary<object, object> doc, bool stealth, AppSettings settings)
     {
         var proxies = GetList(doc, "proxies");
         var names = new List<string>();
+        var fastNames = new List<string>();
         foreach (var item in proxies)
         {
-            if (item is Dictionary<object, object> d && d.TryGetValue("name", out var n) && n != null)
-                names.Add(n.ToString()!);
-            else if (item is Dictionary<string, object> ds && ds.TryGetValue("name", out var ns) && ns != null)
-                names.Add(ns.ToString()!);
+            var name = ProxyName(item);
+            if (string.IsNullOrEmpty(name)) continue;
+            names.Add(name);
+            if (IsFastProtocol(item)) fastNames.Add(name);
         }
 
         var groups = GetList(doc, "proxy-groups");
         var hasProxy = groups.Any(g => NameOf(g).Equals("PROXY", StringComparison.OrdinalIgnoreCase));
         var hasAuto = groups.Any(g => NameOf(g).Equals("AUTO", StringComparison.OrdinalIgnoreCase));
+        var hasRush = groups.Any(g => NameOf(g).Equals("RUSH", StringComparison.OrdinalIgnoreCase));
+        var rush = settings.RfRushMode && fastNames.Count > 0;
 
         // Faster + quieter url-test: lazy (no dial until used), longer interval
         if (!hasAuto && names.Count > 0)
@@ -214,7 +218,6 @@ public static class ConfigBuilder
         }
         else
         {
-            // Patch existing AUTO for speed/stealth
             foreach (var g in groups)
             {
                 if (!NameOf(g).Equals("AUTO", StringComparison.OrdinalIgnoreCase)) continue;
@@ -227,6 +230,42 @@ public static class ConfigBuilder
             }
         }
 
+        // РФ Rush SPEED lane — only Hysteria2 / TUIC / VLESS / Trojan (snappy UDP/TLS transports)
+        if (rush && !hasRush)
+        {
+            groups.Insert(0, new Dictionary<object, object>
+            {
+                ["name"] = "RUSH",
+                ["type"] = "url-test",
+                ["url"] = "https://www.gstatic.com/generate_204",
+                ["interval"] = 90,
+                ["tolerance"] = 40,
+                ["lazy"] = false,
+                ["expected-status"] = "204",
+                ["proxies"] = fastNames.Cast<object>().ToList()
+            });
+        }
+        else if (rush)
+        {
+            foreach (var g in groups)
+            {
+                if (!NameOf(g).Equals("RUSH", StringComparison.OrdinalIgnoreCase)) continue;
+                if (g is Dictionary<object, object> d)
+                {
+                    d["proxies"] = fastNames.Cast<object>().ToList();
+                    d["interval"] = 90;
+                    d["tolerance"] = 40;
+                    d["lazy"] = false;
+                }
+            }
+        }
+
+        var proxyChildren = new List<string>();
+        if (rush && settings.PreferRushLane) proxyChildren.Add("RUSH");
+        proxyChildren.Add("AUTO");
+        if (rush && !settings.PreferRushLane) proxyChildren.Add("RUSH");
+        proxyChildren.AddRange(names);
+
         if (!hasProxy && names.Count > 0)
         {
             groups.Insert(0, new Dictionary<object, object>
@@ -234,7 +273,7 @@ public static class ConfigBuilder
                 ["name"] = "PROXY",
                 ["type"] = "select",
                 ["lazy"] = true,
-                ["proxies"] = names.Concat(["AUTO"]).Cast<object>().ToList()
+                ["proxies"] = proxyChildren.Distinct(StringComparer.OrdinalIgnoreCase).Cast<object>().ToList()
             });
         }
         else
@@ -243,11 +282,58 @@ public static class ConfigBuilder
             {
                 if (!NameOf(g).Equals("PROXY", StringComparison.OrdinalIgnoreCase)) continue;
                 if (g is Dictionary<object, object> d)
+                {
                     d["lazy"] = true;
+                    if (rush)
+                    {
+                        var existing = new List<string>();
+                        if (d.TryGetValue("proxies", out var pl) && pl is IEnumerable<object> en)
+                        {
+                            foreach (var x in en)
+                            {
+                                var s = x?.ToString();
+                                if (!string.IsNullOrEmpty(s)) existing.Add(s);
+                            }
+                        }
+                        var merged = proxyChildren.Concat(existing)
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .ToList();
+                        d["proxies"] = merged.Cast<object>().ToList();
+                    }
+                }
             }
         }
 
         Set(doc, "proxy-groups", groups);
+    }
+
+    static string ProxyName(object item)
+    {
+        if (item is Dictionary<object, object> d && d.TryGetValue("name", out var n) && n != null)
+            return n.ToString() ?? "";
+        if (item is Dictionary<string, object> ds && ds.TryGetValue("name", out var ns) && ns != null)
+            return ns.ToString() ?? "";
+        return "";
+    }
+
+    static string ProxyType(object item)
+    {
+        if (item is Dictionary<object, object> d && d.TryGetValue("type", out var t) && t != null)
+            return t.ToString() ?? "";
+        if (item is Dictionary<string, object> ds && ds.TryGetValue("type", out var ts) && ts != null)
+            return ts.ToString() ?? "";
+        return "";
+    }
+
+    static bool IsFastProtocol(object item)
+    {
+        var type = ProxyType(item);
+        return type.Equals("hysteria2", StringComparison.OrdinalIgnoreCase)
+            || type.Equals("hysteria", StringComparison.OrdinalIgnoreCase)
+            || type.Equals("tuic", StringComparison.OrdinalIgnoreCase)
+            || type.Equals("vless", StringComparison.OrdinalIgnoreCase)
+            || type.Equals("trojan", StringComparison.OrdinalIgnoreCase)
+            || type.Equals("wireguard", StringComparison.OrdinalIgnoreCase);
     }
 
     static void ApplySmartRouting(Dictionary<object, object> doc, AppSettings settings)
@@ -268,11 +354,13 @@ public static class ConfigBuilder
             "IP-CIDR6,fe80::/10,DIRECT,no-resolve"
         };
 
+        // Critical services first — before QUIC/STUN rejects, so Cursor/GitHub are not blackholed.
+        foreach (var rule in AlwaysProxyRules())
+            rules.Add(rule);
+
         // WebRTC / STUN / TURN — real IP leak vector
         if (settings.BlockStun || stealth)
         {
-            rules.Add("DOMAIN-KEYWORD,stun,REJECT");
-            rules.Add("DOMAIN-KEYWORD,turn.,REJECT");
             rules.Add("DOMAIN-SUFFIX,stun.cloudflare.com,REJECT");
             rules.Add("DOMAIN-SUFFIX,stun.l.google.com,REJECT");
             rules.Add("DOMAIN-SUFFIX,stun1.l.google.com,REJECT");
@@ -283,9 +371,9 @@ public static class ConfigBuilder
             rules.Add("AND,((NETWORK,udp),(DST-PORT,5349)),REJECT");
         }
 
-        // Anti-DPI: kill QUIC
+        // QUIC to everything else goes through PROXY (REJECT made Cursor/GitHub hang on HTTP/3).
         if (settings.BlockQuic || stealth)
-            rules.Add("AND,((NETWORK,udp),(DST-PORT,443)),REJECT");
+            rules.Add("AND,((NETWORK,udp),(DST-PORT,443)),PROXY");
 
         // IP-check hosts always via PROXY — for leak test + hide real IP from those APIs
         rules.Add("DOMAIN-SUFFIX,ipify.org,PROXY");
@@ -294,6 +382,15 @@ public static class ConfigBuilder
         rules.Add("DOMAIN-SUFFIX,ip.sb,PROXY");
         rules.Add("DOMAIN,api.ipify.org,PROXY");
         rules.Add("DOMAIN,ifconfig.co,PROXY");
+
+        // РФ Rush: Russian destinations stay DIRECT (local speed), blocked/foreign packs via PROXY
+        if (settings.RfRushMode)
+        {
+            foreach (var rule in RfEmergencyProxyRules())
+                rules.Add(rule);
+            // Local RU networks — don't hairpin through VPN (huge latency win)
+            rules.Add("GEOIP,RU,DIRECT,no-resolve");
+        }
 
         // Custom lists
         providers["jester-direct"] = ProviderFile("domain", RuleListService.CustomDirectFile);
@@ -379,6 +476,78 @@ public static class ConfigBuilder
         ["format"] = "text",
         ["path"] = "./ruleset/" + fileName
     };
+
+    /// <summary>Always via VPN — independent of Rush. Cursor/GitHub die if they fall to DIRECT or QUIC-reject.</summary>
+    static IEnumerable<string> AlwaysProxyRules()
+    {
+        string[] domains =
+        [
+            "cursor.com", "cursor.sh", "cursorapi.com", "todesktop.com",
+            "github.com", "githubusercontent.com", "githubassets.com", "github.io",
+            "ghcr.io", "github.dev", "githubcopilot.com",
+            "vscode.dev", "vscode-cdn.net", "visualstudio.com",
+            "gitlab.com", "bitbucket.org"
+        ];
+        foreach (var d in domains)
+            yield return "DOMAIN-SUFFIX," + d + ",PROXY";
+    }
+
+    static List<object> CriticalFakeIpFilter(AppSettings settings)
+    {
+        var list = settings.Dns.FakeIpFilter.Cast<object>().ToList();
+        string[] extra =
+        [
+            "+.cursor.com", "+.cursor.sh", "+.cursorapi.com",
+            "+.github.com", "+.githubusercontent.com", "+.githubassets.com", "+.ghcr.io"
+        ];
+        foreach (var d in extra)
+        {
+            if (!list.Any(x => string.Equals(x?.ToString(), d, StringComparison.OrdinalIgnoreCase)))
+                list.Add(d);
+        }
+        return list;
+    }
+
+    /// <summary>Hard-coded RF emergency pack — works even before Re:filter download finishes.</summary>
+    static IEnumerable<string> RfEmergencyProxyRules()
+    {
+        string[] domains =
+        [
+            // Social / media
+            "youtube.com", "youtu.be", "googlevideo.com", "ytimg.com", "ggpht.com",
+            "instagram.com", "cdninstagram.com", "facebook.com", "fbcdn.net", "meta.com",
+            "twitter.com", "x.com", "twimg.com", "t.co",
+            "tiktok.com", "tiktokv.com", "musical.ly",
+            "discord.com", "discord.gg", "discordapp.com", "discord.media", "discordapp.net",
+            "linkedin.com", "licdn.com",
+            // Messengers / calls
+            "telegram.org", "t.me", "telegra.ph", "cdn-telegram.org",
+            "signal.org", "whispersystems.org",
+            // AI / cloud
+            "openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com",
+            "anthropic.com", "claude.ai",
+            "gemini.google.com", "aistudio.google.com", "googleapis.com",
+            "perplexity.ai", "grok.com", "x.ai",
+            "notion.so", "notion.site",
+            // Dev / media
+            "github.com", "githubusercontent.com", "githubassets.com", "githubcopilot.com",
+            "gitlab.com", "npmjs.com", "pypi.org", "docker.com", "medium.com",
+            "reddit.com", "redd.it", "redditmedia.com", "redditstatic.com",
+            "twitch.tv", "ttvnw.net", "jtvnw.net",
+            "spotify.com", "scdn.co", "spotifycdn.com",
+            "netflix.com", "nflxvideo.net", "nflximg.net",
+            // Google / CDN often throttled
+            "google.com", "gstatic.com", "googleusercontent.com", "google.com.ua",
+            "cloudflare.com", "cloudflare-dns.com",
+            "wikipedia.org", "wikimedia.org",
+            // VPN-ish helpers / stores
+            "play.google.com", "apple.com", "icloud.com",
+            "proton.me", "protonmail.com", "mullvad.net"
+        ];
+
+        foreach (var d in domains)
+            yield return "DOMAIN-SUFFIX," + d + ",PROXY";
+    }
 
     static List<object> GetList(Dictionary<object, object> doc, string key)
     {

@@ -78,6 +78,14 @@ public sealed class AppSettings
     /// <summary>Hide window from screenshots / screen capture (WDA_EXCLUDEFROMCAPTURE).</summary>
     public bool HideFromCapture { get; set; } = true;
 
+    /// <summary>
+    /// РФ Rush: SPEED-lane (Hysteria2/TUIC/VLESS), GEOIP RU→DIRECT, emergency blocked domains.
+    /// Built for Russian DPI — uncommon as a one-toggle product mode.
+    /// </summary>
+    public bool RfRushMode { get; set; } = true;
+    /// <summary>After rush enable, prefer RUSH url-test group as default PROXY pick.</summary>
+    public bool PreferRushLane { get; set; } = true;
+
     public string RefilterDomainsMrsUrl { get; set; } =
         "https://github.com/legiz-ru/mihomo-rule-sets/raw/main/re-filter/domain-rule.mrs";
     public string RefilterIpMrsUrl { get; set; } =
@@ -112,19 +120,19 @@ public sealed class DnsSettings
 public sealed class AppearanceSettings
 {
     public string Theme { get; set; } = "dark";
-    public string Accent { get; set; } = "#f2f2f2";
-    public string AccentMuted { get; set; } = "#8a8a8a";
-    public string Background { get; set; } = "#050505";
-    public string Surface { get; set; } = "#111111";
-    public string Text { get; set; } = "#f5f5f5";
-    public string BackgroundStyle { get; set; } = "solid";
+    public string Accent { get; set; } = "#e6c48a";
+    public string AccentMuted { get; set; } = "#a89068";
+    public string Background { get; set; } = "#090a0e";
+    public string Surface { get; set; } = "#12131a";
+    public string Text { get; set; } = "#f7f3ec";
+    public string BackgroundStyle { get; set; } = "mesh";
     public string? BackgroundImage { get; set; }
     public bool Glass { get; set; }
-    public int GlassBlur { get; set; } = 8;
-    public int Radius { get; set; } = 8;
+    public int GlassBlur { get; set; }
+    public int Radius { get; set; } = 16;
     public double WindowOpacity { get; set; } = 1;
-    public string FontUi { get; set; } = "Sora";
-    public string FontDisplay { get; set; } = "Syne";
+    public string FontUi { get; set; } = "Segoe UI";
+    public string FontDisplay { get; set; } = "Segoe UI";
     public string Sidebar { get; set; } = "full";
     public bool Animations { get; set; } = true;
     public bool TrafficGraph { get; set; } = true;

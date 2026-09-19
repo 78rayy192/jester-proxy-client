@@ -64,7 +64,25 @@ public partial class App : WinApp
                 var port = _settings.Current.MixedPort;
                 Current.Dispatcher.Invoke(() => System.Windows.Clipboard.SetText("127.0.0.1:" + port));
             },
-            SystemProxy = on => SystemProxy.Set(on, _settings.Current.MixedPort)
+            SystemProxy = on =>
+            {
+                if (on)
+                {
+                    var needRestart = _core.Running && _settings.Current.TunEnabled;
+                    _settings.Patch(s =>
+                    {
+                        s.SystemProxy = true;
+                        s.TunEnabled = false;
+                    });
+                    if (needRestart) _ = _core.RestartAsync();
+                    else Services.SystemProxy.Set(true, _settings.Current.MixedPort);
+                }
+                else
+                {
+                    Services.SystemProxy.Set(false, 0);
+                    _settings.Patch(s => s.SystemProxy = false);
+                }
+            }
         });
 
         WindowActions.Minimize = () => window.WindowState = WindowState.Minimized;
@@ -81,6 +99,11 @@ public partial class App : WinApp
             }
             _core.Stop();
             Shutdown();
+        };
+        WindowActions.ApplyCapture = () =>
+        {
+            try { Current.Dispatcher.Invoke(() => window.ApplyCaptureProtection()); }
+            catch { /* ignore */ }
         };
         WindowActions.Drag = () =>
         {

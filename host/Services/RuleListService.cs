@@ -144,5 +144,49 @@ public sealed class LeakCheckResult
     public string? ExitIp { get; set; }
     public bool Masked { get; set; }
     public bool Running { get; set; }
+    public bool TunMode { get; set; }
+    public int Score { get; set; }
+    public string Message { get; set; } = "";
+    public List<GhostCheck> Checks { get; set; } = [];
+}
+
+public sealed class GhostCheck
+{
+    public string Id { get; set; } = "";
+    public string Label { get; set; } = "";
+    public bool Ok { get; set; }
+    public int Weight { get; set; } = 1;
+    public string Detail { get; set; } = "";
+}
+
+public sealed class GhostPanicResult
+{
+    public bool Ok { get; set; }
+    public string Message { get; set; } = "";
+}
+
+public sealed class RushResult
+{
+    public bool Enabled { get; set; }
+    public string Lane { get; set; } = "";
+    public string? Node { get; set; }
+    public int DelayMs { get; set; }
+    public string Message { get; set; } = "";
+}
+
+public sealed class LearnResult
+{
+    public bool Ok { get; set; }
+    public int Added { get; set; }
+    public List<string> Domains { get; set; } = [];
+    public string Message { get; set; } = "";
+}
+
+public sealed class PortApplyResult
+{
+    public bool Ok { get; set; }
+    public int MixedPort { get; set; }
+    public int SocksPort { get; set; }
+    public int ExternalPort { get; set; }
     public string Message { get; set; } = "";
 }

@@ -13,7 +13,7 @@ export function Profiles() {
 
   return (
     <div>
-      <div className="page-head"><div><h1>{i.profiles}</h1><p>Happ, v2ray, Clash YAML — ссылка или вставка. Узлы сами переводятся в mihomo.</p></div></div>
+      <div className="page-head"><div><h1>{i.profiles}</h1><p>Поддерживаются подписки и конфигурации Clash, v2ray и Hysteria2.</p></div></div>
       <div className="grid cols-2">
         <div className="card">
           <h2>{i.importProfile}</h2>
@@ -31,12 +31,12 @@ export function Profiles() {
         </div>
         <div className="card">
           <h2>Список</h2>
-          {profiles.length === 0 && <p className="hint">Пока пусто.</p>}
+          {profiles.length === 0 && <p className="hint">Профили отсутствуют.</p>}
           {profiles.map((p) => (
             <div key={p.id} className="card" style={{ marginBottom: 10, boxShadow: 'none', background: p.id === settings?.activeProfileId ? 'color-mix(in srgb, var(--accent) 12%, transparent)' : 'transparent' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                 <strong>{p.name}</strong>
-                {p.id === settings?.activeProfileId && <span className="badge on">активен</span>}
+                {p.id === settings?.activeProfileId && <span className="badge on">Активен</span>}
               </div>
               <p className="hint">{p.kind} · {(p.bytes / 1024).toFixed(1)} KB · {new Date(p.updatedAt).toLocaleString()}</p>
               <div className="btn-row">

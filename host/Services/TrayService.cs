@@ -59,7 +59,7 @@ public sealed class TrayService : IDisposable
             Renderer = new ToolStripProfessionalRenderer(new InkColors())
         };
 
-        menu.Items.Add(Item("Открыть окно", (_, _) => _host.Show()));
+        menu.Items.Add(Item("Открыть", (_, _) => _host.Show()));
         menu.Items.Add(new ToolStripSeparator());
 
         _run = Item("Запустить", async (_, _) => await ToggleCore());
@@ -87,15 +87,15 @@ public sealed class TrayService : IDisposable
         menu.Items.Add(_proxy);
         menu.Items.Add(new ToolStripSeparator());
 
-        _rule = Check("Режим · правила", () => SetMode("rule"));
-        _global = Check("Режим · глобальный", () => SetMode("global"));
-        _direct = Check("Режим · прямой", () => SetMode("direct"));
+        _rule = Check("Режим: по правилам", () => SetMode("rule"));
+        _global = Check("Режим: глобальный", () => SetMode("global"));
+        _direct = Check("Режим: прямое соединение", () => SetMode("direct"));
         menu.Items.Add(_rule);
         menu.Items.Add(_global);
         menu.Items.Add(_direct);
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(Item("Скопировать 127.0.0.1:порт", (_, _) => _host.CopyPort()));
-        menu.Items.Add(Item("От администратора", (_, _) => _host.Elevate()));
+        menu.Items.Add(Item("Скопировать адрес", (_, _) => _host.CopyPort()));
+        menu.Items.Add(Item("Перезапуск с правами администратора", (_, _) => _host.Elevate()));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(Item("Выход", (_, _) => _host.Exit()));
 
