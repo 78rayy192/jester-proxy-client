@@ -15,7 +15,7 @@ export function Logs() {
   }, [])
   return (
     <div>
-      <div className="page-head"><div><h1>{i.logs}</h1><p>Вывод mihomo</p></div><button className="btn" onClick={load}>Обновить</button></div>
+      <div className="page-head"><div><h1>{i.logs}</h1><p>Журнал ядра</p></div><button className="btn" onClick={load}>Обновить</button></div>
       <div className="log">{text}</div>
     </div>
   )

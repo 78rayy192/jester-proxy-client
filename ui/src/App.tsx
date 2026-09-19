@@ -23,27 +23,6 @@ const nav = [
   ['appearance', 'appearance', icons.appearance],
 ] as const
 
-const googleFonts: Record<string, string> = {
-  Sora: 'Sora:wght@400;500;600;700',
-  Syne: 'Syne:wght@600;700;800',
-  'IBM Plex Mono': 'IBM+Plex+Mono:wght@400;500',
-  Outfit: 'Outfit:wght@400;500;600;700',
-  Fraunces: 'Fraunces:opsz,wght@9..144,500;700',
-  Manrope: 'Manrope:wght@400;500;600;700',
-}
-
-function ensureFont(family: string) {
-  const spec = googleFonts[family]
-  if (!spec) return
-  const id = 'gf-' + family.replace(/\s+/g, '-')
-  if (document.getElementById(id)) return
-  const link = document.createElement('link')
-  link.id = id
-  link.rel = 'stylesheet'
-  link.href = `https://fonts.googleapis.com/css2?family=${spec}&display=swap`
-  document.head.appendChild(link)
-}
-
 function applyTheme() {
   const a = useApp.getState().settings?.appearance
   if (!a) return
@@ -53,13 +32,11 @@ function applyTheme() {
   r.setProperty('--accent-2', a.accentMuted)
   r.setProperty('--text', a.text)
   r.setProperty('--radius', a.radius + 'px')
-  r.setProperty('--blur', a.glassBlur + 'px')
-  r.setProperty('--font-ui', `"${a.fontUi}", "Sora", "Segoe UI", sans-serif`)
-  r.setProperty('--font-display', `"${a.fontDisplay}", "Syne", sans-serif`)
+  r.setProperty('--blur', '0px')
+  r.setProperty('--font-ui', '"Segoe UI Variable Text", "Segoe UI", sans-serif')
+  r.setProperty('--font-display', '"Segoe UI Variable Display", "Segoe UI", sans-serif')
   document.documentElement.dataset.motion = a.animations === false ? 'off' : 'on'
-  document.body.style.opacity = String(a.windowOpacity)
-  ensureFont(a.fontUi)
-  ensureFont(a.fontDisplay)
+  document.body.style.opacity = String(Math.max(0.92, a.windowOpacity || 1))
 }
 
 export function App() {
@@ -76,7 +53,7 @@ export function App() {
 
   useEffect(() => {
     if (!status?.running) {
-      setLive({ up: 0, down: 0, mem: 0 })
+      setLive({ up: 0, down: 0, mem: 0, now: '' })
       return
     }
 
@@ -163,6 +140,9 @@ export function App() {
       }
       if (typing) return
       if (e.key === ' ') {
+        const el = e.target as HTMLElement
+        if (el.closest('button, a, [role="button"], [contenteditable="true"]')) return
+        if (useApp.getState().busy) return
         e.preventDefault()
         run(async () => {
           const st = useApp.getState().status
@@ -193,9 +173,9 @@ export function App() {
 
   return (
     <div
-      className={'app' + (settings?.appearance.glass ? ' glass' : '')}
-      data-bg={settings?.appearance.backgroundStyle || 'mesh'}
-      style={settings?.appearance.backgroundStyle === 'image' && settings.appearance.backgroundImage
+      className={'app' + (settings?.appearance?.glass ? ' glass' : '')}
+      data-bg={settings?.appearance?.backgroundStyle || 'mesh'}
+      style={settings?.appearance?.backgroundStyle === 'image' && settings.appearance.backgroundImage
         ? { backgroundImage: `linear-gradient(rgba(11,10,15,.72), rgba(11,10,15,.82)), url(${settings.appearance.backgroundImage})` }
         : undefined}
     >
@@ -218,12 +198,12 @@ export function App() {
           {live.now ? <span className="now-chip">{live.now}</span> : null}
         </div>
         <div className="win-btns">
-          <button type="button" onMouseDown={(e) => e.stopPropagation()} onClick={() => hostMsg('minimize')}>─</button>
-          <button type="button" onMouseDown={(e) => e.stopPropagation()} onClick={() => hostMsg('maximize')}>▢</button>
-          <button type="button" className="close" onMouseDown={(e) => e.stopPropagation()} onClick={() => hostMsg('close')}>✕</button>
+          <button type="button" title="Свернуть" aria-label="Свернуть" onMouseDown={(e) => e.stopPropagation()} onClick={() => hostMsg('minimize')}>─</button>
+          <button type="button" title="Развернуть" aria-label="Развернуть" onMouseDown={(e) => e.stopPropagation()} onClick={() => hostMsg('maximize')}>▢</button>
+          <button type="button" className="close" title="Закрыть" aria-label="Закрыть" onMouseDown={(e) => e.stopPropagation()} onClick={() => hostMsg('close')}>✕</button>
         </div>
       </header>
-      <div className={'shell' + (settings?.appearance.sidebar === 'compact' ? ' compact' : '')}>
+      <div className={'shell' + (settings?.appearance?.sidebar === 'compact' ? ' compact' : '')}>
         <aside className="sidebar">
           {nav.map(([id, key, d], n) => (
             <button
@@ -248,7 +228,7 @@ export function App() {
               <span className={'dot' + (status?.running ? ' on' : status?.needsAdmin ? ' warn' : '')} />
             </div>
             <div className="pill-meta">
-              <div className="k">core</div>
+              <div className="k">Ядро</div>
               <div className="v">{status?.running ? i.online : i.idle}</div>
             </div>
           </div>
@@ -258,7 +238,7 @@ export function App() {
           {pages[page]}
         </main>
       </div>
-      {settings?.appearance.customCss ? <style>{settings.appearance.customCss}</style> : null}
+      {settings?.appearance?.customCss ? <style>{settings.appearance.customCss}</style> : null}
     </div>
   )
 }

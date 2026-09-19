@@ -35,12 +35,17 @@ public sealed class ProfileStore
 
     public ProfileInfo? Get(string id)
     {
+        if (!IsValidId(id)) return null;
         var meta = MetaPath(id);
         if (!File.Exists(meta)) return null;
         return JsonSerializer.Deserialize<ProfileInfo>(File.ReadAllText(meta), Json);
     }
 
-    public string ConfigPath(string id) => Path.Combine(AppPaths.Profiles, id, "config.yaml");
+    public string ConfigPath(string id)
+    {
+        EnsureValidId(id);
+        return Path.Combine(AppPaths.Profiles, id, "config.yaml");
+    }
 
     public async Task<ProfileInfo> CreateAsync(CreateProfileRequest req, CancellationToken ct = default)
     {
@@ -75,6 +80,7 @@ public sealed class ProfileStore
 
     public async Task<ProfileInfo> UpdateSubscriptionAsync(string id, CancellationToken ct = default)
     {
+        EnsureValidId(id);
         var info = Get(id) ?? throw new FileNotFoundException("Профиль не найден", id);
         if (info.Kind != "subscription" || string.IsNullOrWhiteSpace(info.Source))
             throw new InvalidOperationException("Это не подписка.");
@@ -90,6 +96,7 @@ public sealed class ProfileStore
 
     public ProfileInfo Rename(string id, string name)
     {
+        EnsureValidId(id);
         var info = Get(id) ?? throw new FileNotFoundException("Профиль не найден", id);
         info.Name = name.Trim();
         File.WriteAllText(MetaPath(id), JsonSerializer.Serialize(info, Json));
@@ -98,11 +105,29 @@ public sealed class ProfileStore
 
     public void Delete(string id)
     {
+        EnsureValidId(id);
         var dir = Path.Combine(AppPaths.Profiles, id);
+        var root = Path.GetFullPath(AppPaths.Profiles);
+        var full = Path.GetFullPath(dir);
+        if (!full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(full, root, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Некорректный id профиля.");
         if (Directory.Exists(dir)) Directory.Delete(dir, true);
     }
 
-    static string MetaPath(string id) => Path.Combine(AppPaths.Profiles, id, "meta.json");
+    public static bool IsValidId(string? id) =>
+        !string.IsNullOrWhiteSpace(id) && System.Text.RegularExpressions.Regex.IsMatch(id, "^[a-f0-9]{12}$");
+
+    static void EnsureValidId(string id)
+    {
+        if (!IsValidId(id)) throw new InvalidOperationException("Некорректный id профиля.");
+    }
+
+    static string MetaPath(string id)
+    {
+        EnsureValidId(id);
+        return Path.Combine(AppPaths.Profiles, id, "meta.json");
+    }
 
     static async Task<string> DownloadAsync(string url, CancellationToken ct)
     {
@@ -135,11 +160,7 @@ public sealed class ProfileStore
 
     static HttpClient CreateClient()
     {
-        var handler = new HttpClientHandler
-        {
-            ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
-        };
-        var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };
+        var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
         http.DefaultRequestHeaders.UserAgent.ParseAdd("clash.meta/v1.19.30");
         return http;
     }

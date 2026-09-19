@@ -59,6 +59,8 @@ public sealed class SettingsStore
                 if (!json.Contains("silentLogs", StringComparison.OrdinalIgnoreCase)) loaded.SilentLogs = true;
                 if (!json.Contains("useMrsRules", StringComparison.OrdinalIgnoreCase)) loaded.UseMrsRules = true;
                 if (!json.Contains("hideFromCapture", StringComparison.OrdinalIgnoreCase)) loaded.HideFromCapture = true;
+                if (!json.Contains("rfRushMode", StringComparison.OrdinalIgnoreCase)) loaded.RfRushMode = true;
+                if (!json.Contains("preferRushLane", StringComparison.OrdinalIgnoreCase)) loaded.PreferRushLane = true;
                 lock (_gate) _current = loaded;
             }
         }

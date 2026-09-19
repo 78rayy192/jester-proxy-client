@@ -20,6 +20,30 @@
                       CornerRadius="8" />
     </WindowChrome.WindowChrome>
     <Border BorderBrush="#22FFFFFF" BorderThickness="1" CornerRadius="8" Background="#050505">
-        <wv2:WebView2 x:Name="Web" DefaultBackgroundColor="#050505" />
+        <Grid>
+            <wv2:WebView2 x:Name="Web" Visibility="Collapsed" DefaultBackgroundColor="#111114" />
+            <StackPanel x:Name="Boot" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="48">
+                <TextBlock Text="JESTER" FontSize="22" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,0,0,18" Foreground="#F5F5F5" />
+                <ProgressBar x:Name="BootBar" IsIndeterminate="True" Height="2" Width="220" Foreground="#F5F5F5" Background="#2A2A2A" BorderThickness="0" />
+                <TextBlock x:Name="BootText"
+                           Text="Инициализация графического движка"
+                           FontSize="13"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap"
+                           MaxWidth="360"
+                           Margin="0,16,0,0"
+                           Foreground="#9A9A9A" />
+                <Button x:Name="BootClose"
+                        Content="Закрыть"
+                        Visibility="Collapsed"
+                        Margin="0,20,0,0"
+                        Padding="16,6"
+                        HorizontalAlignment="Center"
+                        Background="Transparent"
+                        Foreground="#F5F5F5"
+                        BorderBrush="#33FFFFFF"
+                        Click="OnBootClose" />
+            </StackPanel>
+        </Grid>
     </Border>
 </Window>

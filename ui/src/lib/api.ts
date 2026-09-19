@@ -99,6 +99,8 @@ export type AppSettings = {
   silentLogs?: boolean
   useMrsRules?: boolean
   hideFromCapture?: boolean
+  rfRushMode?: boolean
+  preferRushLane?: boolean
 }
 
 export type RuleListStatus = {
@@ -169,6 +171,19 @@ export const api = {
   rulesStatus: () => req<RuleListStatus>('/api/rules/status'),
   rulesUpdate: () => req<RuleListStatus>('/api/rules/update', { method: 'POST' }),
   leakCheck: () => req<LeakCheckResult>('/api/leak-check'),
+  ghostPanic: () => req<GhostPanicResult>('/api/ghost/panic', { method: 'POST' }),
+  ghostRush: () => req<RushResult>('/api/ghost/rush', { method: 'POST' }),
+  ghostLearn: () => req<LearnResult>('/api/ghost/learn', { method: 'POST' }),
+  applyPorts: (mixedPort: number, socksPort: number, externalPort: number) =>
+    req<PortApplyResult>('/api/ports', { method: 'POST', body: JSON.stringify({ mixedPort, socksPort, externalPort }) }),
+}
+
+export type GhostCheck = {
+  id: string
+  label: string
+  ok: boolean
+  weight: number
+  detail?: string
 }
 
 export type LeakCheckResult = {
@@ -176,6 +191,37 @@ export type LeakCheckResult = {
   exitIp?: string | null
   masked: boolean
   running: boolean
+  tunMode?: boolean
+  score?: number
+  message: string
+  checks?: GhostCheck[]
+}
+
+export type GhostPanicResult = {
+  ok: boolean
+  message: string
+}
+
+export type RushResult = {
+  enabled: boolean
+  lane?: string
+  node?: string | null
+  delayMs?: number
+  message: string
+}
+
+export type LearnResult = {
+  ok: boolean
+  added: number
+  domains: string[]
+  message: string
+}
+
+export type PortApplyResult = {
+  ok: boolean
+  mixedPort: number
+  socksPort: number
+  externalPort: number
   message: string
 }
 
@@ -234,7 +280,7 @@ export type ClashProxy = {
 export type ClashRule = { type: string; payload: string; proxy: string; size?: number }
 export type ClashConn = {
   id: string
-  metadata: {
+  metadata?: {
     network: string
     type: string
     sourceIP: string

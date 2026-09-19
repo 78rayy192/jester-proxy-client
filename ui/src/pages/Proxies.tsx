@@ -59,23 +59,30 @@ export function Proxies() {
     return lastDelay(proxies[name])
   }
 
+  function selectGroup() {
+    if (proxies.PROXY) return 'PROXY'
+    if (proxies.GLOBAL) return 'GLOBAL'
+    const g = Object.values(proxies).find((x) => x.type === 'Selector')
+    return g?.name || 'PROXY'
+  }
+
   async function testServers() {
     setTesting(true)
     setTestError('')
     try {
       const map = await api.testDelays(url, timeout)
       setDelays((p) => ({ ...p, ...map }))
-      if (!Object.keys(map).length) setTestError('Тест не вернул задержки. Проверьте, что ядро запущено.')
+      if (!Object.keys(map).length) setTestError('Серверы не ответили. Убедитесь, что ядро запущено.')
       await load()
     } catch (e) {
-      setTestError(e instanceof Error ? e.message : 'Ошибка теста')
+      setTestError(e instanceof Error ? e.message : 'Проверка задержки не выполнена')
     } finally {
       setTesting(false)
     }
   }
 
   async function pick(name: string) {
-    await clash.select('PROXY', name)
+    await clash.select(selectGroup(), name)
     await load()
   }
 
@@ -117,11 +124,11 @@ export function Proxies() {
       <div className="page-head">
         <div>
           <h1>{i.proxies}</h1>
-          <p>Серверы из подписки. Маршрутизация — во вкладке «Правила».</p>
+          <p>Серверы из активной подписки. Маршрутизация настраивается в разделе «Правила».</p>
         </div>
         <div className="btn-row">
           <button type="button" className="btn primary" disabled={testing} onClick={() => testServers()}>
-            {testing ? 'Тест…' : i.test}
+            {testing ? 'Проверка…' : i.test}
           </button>
         </div>
       </div>
@@ -131,8 +138,8 @@ export function Proxies() {
       <div className="mode-bar">
         <div className="mode-card">
           <div>
-            <div className="k">TUN</div>
-            <div className="hint">Системный VPN-адаптер</div>
+            <div className="k">Туннель</div>
+            <div className="hint">Системный сетевой адаптер</div>
           </div>
           <button type="button" className={'toggle' + (settings?.tunEnabled ? ' on' : '')} disabled={busy} onClick={() => run(toggleTun)} />
         </div>
@@ -141,28 +148,28 @@ export function Proxies() {
             <div className="k">{i.sysProxy}</div>
             <div className="hint">
               Windows → 127.0.0.1:{settings?.mixedPort}
-              {winProxy ? ' · вкл в системе' : ' · выкл в системе'}
+              {winProxy ? ' · включён в системе' : ' · отключён в системе'}
             </div>
           </div>
           <button type="button" className={'toggle' + (proxyOn && winProxy ? ' on' : '')} disabled={busy} onClick={() => run(toggleSysProxy)} />
         </div>
         <div className="mode-card">
           <div>
-            <div className="k">Узел</div>
+            <div className="k">Сервер</div>
             <div className="hint trunc">{now || 'не выбран'}</div>
           </div>
         </div>
       </div>
 
       <div className="toolbar">
-        <input className="search" placeholder="Найти сервер…  /" value={q} onChange={(e) => setQ(e.target.value)} id="proxy-search" />
+        <input className="search" placeholder="Поиск сервера" value={q} onChange={(e) => setQ(e.target.value)} id="proxy-search" />
         <select value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
-          <option value="delay">по пингу</option>
-          <option value="name">по имени</option>
-          <option value="default">как в профиле</option>
+          <option value="delay">По задержке</option>
+          <option value="name">По имени</option>
+          <option value="default">Порядок профиля</option>
         </select>
         <button type="button" className={'btn' + (hideDead ? ' primary' : '')} onClick={() => setHideDead((v) => !v)}>
-          {hideDead ? 'мёртвые скрыты' : 'скрыть мёртвые'}
+          {hideDead ? 'Недоступные скрыты' : 'Скрыть недоступные'}
         </button>
       </div>
 
@@ -188,7 +195,7 @@ export function Proxies() {
             </button>
           )
         })}
-        {!names.length && <div className="empty" style={{ gridColumn: '1 / -1' }}><p>Нет серверов из подписки.</p></div>}
+        {!names.length && <div className="empty" style={{ gridColumn: '1 / -1' }}><p>В подписке нет доступных серверов.</p></div>}
       </div>
     </div>
   )
