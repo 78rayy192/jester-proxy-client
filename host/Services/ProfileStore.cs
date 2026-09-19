@@ -133,10 +133,16 @@ public sealed class ProfileStore
     {
         url = UnwrapInstallLink(url);
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
-        req.Headers.TryAddWithoutValidation("User-Agent", "clash.meta/v1.19.30");
+        req.Headers.TryAddWithoutValidation("User-Agent", "Happ/3.13.0/Windows");
         req.Headers.TryAddWithoutValidation("Accept", "*/*");
+        req.Headers.TryAddWithoutValidation("x-hwid", DeviceId.Current());
+        req.Headers.TryAddWithoutValidation("x-device-os", "Windows");
+        req.Headers.TryAddWithoutValidation("x-ver-os", Environment.OSVersion.Version.ToString());
+        req.Headers.TryAddWithoutValidation("x-device-model", "Jester");
         using var res = await Http.SendAsync(req, ct);
         res.EnsureSuccessStatusCode();
+        if (HeaderIs(res, "x-hwid-max-devices-reached"))
+            throw new InvalidOperationException("Достигнут лимит устройств поставщика. Удалите неиспользуемое устройство в боте и обновите подписку.");
         var body = await res.Content.ReadAsStringAsync(ct);
         if (string.IsNullOrWhiteSpace(body))
             throw new InvalidOperationException("Подписка вернула пустой ответ.");
@@ -161,7 +167,10 @@ public sealed class ProfileStore
     static HttpClient CreateClient()
     {
         var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-        http.DefaultRequestHeaders.UserAgent.ParseAdd("clash.meta/v1.19.30");
         return http;
     }
+
+    static bool HeaderIs(HttpResponseMessage res, string name) =>
+        res.Headers.TryGetValues(name, out var values)
+        && values.Any(v => v.Equals("true", StringComparison.OrdinalIgnoreCase));
 }

@@ -20,6 +20,12 @@ function isServer(p?: ClashProxy) {
   return true
 }
 
+function splitName(name: string) {
+  const mark = name.match(/^(\p{Regional_Indicator}{2})\s*/u)
+  if (!mark) return { flag: '', title: name }
+  return { flag: mark[1], title: name.slice(mark[0].length) || name }
+}
+
 function isDead(delay?: number) {
   return delay != null && (delay <= 0 || delay >= 10000)
 }
@@ -178,6 +184,7 @@ export function Proxies() {
           const node = proxies[name]
           const delay = delayOf(name)
           const tone = delayTone(delay)
+          const label = splitName(name)
           return (
             <button
               key={name}
@@ -185,7 +192,7 @@ export function Proxies() {
               className={'node ' + tone + (now === name ? ' now' : '')}
               onClick={() => run(() => pick(name))}
             >
-              <div className="name">{name}</div>
+              <div className="name">{label.flag && <span className="flag">{label.flag}</span>}<span>{label.title}</span></div>
               <div className="meta">
                 <span>{node?.type || ''}{node?.udp ? ' · UDP' : ''}</span>
                 <span className={'ping ' + tone}>

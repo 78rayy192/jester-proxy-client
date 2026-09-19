@@ -648,7 +648,8 @@ input, select, textarea { user-select: text; }
   border-radius: 99px;
   background: var(--accent);
 }
-.node .name { font-size: 13px; font-weight: 500; margin-bottom: 8px; letter-spacing: -0.01em; }
+.node .name { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; font-weight: 500; margin-bottom: 8px; letter-spacing: -0.01em; }
+.node .flag { font-size: 18px; line-height: 1.15; flex: none; }
 .node .meta { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; font-family: var(--font-mono); }
 .ping.fast { color: var(--ok); }
 .ping.ok { color: #c8c8c8; }
