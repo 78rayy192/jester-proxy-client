@@ -22,12 +22,16 @@ public static class SubscriptionNormalizer
             throw new InvalidOperationException("Пустая подписка.");
 
         var text = raw.Trim().TrimStart('\uFEFF');
+        var fromJson = TryXrayJson(text);
+        if (fromJson != null) return fromJson;
         if (LooksLikeClash(text)) return DecorateYaml(text);
 
         var decoded = TryBase64(text);
         if (decoded != null)
         {
-            if (LooksLikeClash(decoded)) return decoded;
+            fromJson = TryXrayJson(decoded);
+            if (fromJson != null) return fromJson;
+            if (LooksLikeClash(decoded)) return DecorateYaml(decoded);
             text = decoded;
         }
 
@@ -81,6 +85,228 @@ public static class SubscriptionNormalizer
             ["rules"] = new List<object> { "MATCH,DIRECT" }
         };
         return Yaml.Serialize(doc);
+    }
+
+    static string? TryXrayJson(string text)
+    {
+        var trimmed = text.TrimStart();
+        if (trimmed.Length == 0 || trimmed[0] is not ('[' or '{')) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            var configs = new List<JsonElement>();
+            if (doc.RootElement.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in doc.RootElement.EnumerateArray())
+                {
+                    if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty("outbounds", out _))
+                        configs.Add(item.Clone());
+                }
+                if (configs.Count == 0) return null;
+            }
+            else if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("outbounds", out _))
+            {
+                configs.Add(doc.RootElement.Clone());
+            }
+            else return null;
+
+            var proxies = new List<Dictionary<string, object>>();
+            var names = new List<string>();
+            var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var config in configs)
+            {
+                var outbound = PickProxyOutbound(config);
+                if (outbound == null) continue;
+                var remark = JsonStr(config, "remarks");
+                if (remark.Length == 0) remark = JsonStr(outbound.Value, "tag");
+                Dictionary<string, object>? proxy;
+                try { proxy = FromXrayOutbound(remark.Length == 0 ? "Сервер" : remark, outbound.Value); }
+                catch { continue; }
+                if (proxy == null) continue;
+                var name = Unique(ServerFlags.Apply(proxy["name"].ToString() ?? "Сервер"), used);
+                proxy["name"] = name;
+                proxies.Add(proxy);
+                names.Add(name);
+            }
+            if (proxies.Count == 0)
+                throw new InvalidOperationException("В ссылке нет поддерживаемых серверов.");
+            RejectNotices(names);
+            return Yaml.Serialize(new Dictionary<string, object>
+            {
+                ["proxies"] = proxies,
+                ["proxy-groups"] = new List<object>
+                {
+                    new Dictionary<string, object>
+                    {
+                        ["name"] = "PROXY",
+                        ["type"] = "select",
+                        ["proxies"] = names.Concat(["AUTO"]).Cast<object>().ToList()
+                    },
+                    new Dictionary<string, object>
+                    {
+                        ["name"] = "AUTO",
+                        ["type"] = "url-test",
+                        ["url"] = "https://www.gstatic.com/generate_204",
+                        ["interval"] = 300,
+                        ["tolerance"] = 50,
+                        ["proxies"] = names.Cast<object>().ToList()
+                    }
+                },
+                ["rules"] = new List<object> { "MATCH,DIRECT" }
+            });
+        }
+        catch (InvalidOperationException) { throw; }
+        catch { return null; }
+    }
+
+    static JsonElement? PickProxyOutbound(JsonElement config)
+    {
+        if (!config.TryGetProperty("outbounds", out var outs) || outs.ValueKind != JsonValueKind.Array)
+            return null;
+        JsonElement? first = null;
+        foreach (var outbound in outs.EnumerateArray())
+        {
+            var proto = JsonStr(outbound, "protocol");
+            if (proto is "freedom" or "blackhole" or "dns" or "loopback") continue;
+            if (JsonStr(outbound, "tag").Equals("proxy", StringComparison.OrdinalIgnoreCase))
+                return outbound.Clone();
+            first ??= outbound.Clone();
+        }
+        return first;
+    }
+
+    static Dictionary<string, object>? FromXrayOutbound(string name, JsonElement outbound)
+    {
+        var proto = JsonStr(outbound, "protocol");
+        if (!outbound.TryGetProperty("settings", out var settings)) return null;
+        var stream = outbound.TryGetProperty("streamSettings", out var ss) ? ss : default;
+
+        if (proto == "vless")
+        {
+            if (!settings.TryGetProperty("vnext", out var vnext) || vnext.GetArrayLength() == 0) return null;
+            var node = vnext[0];
+            if (!node.TryGetProperty("users", out var users) || users.GetArrayLength() == 0) return null;
+            var user = users[0];
+            var port = JsonInt(node, "port");
+            var proxy = Base("vless", name, JsonStr(node, "address"), port > 0 ? port : 443);
+            proxy["uuid"] = JsonStr(user, "id");
+            proxy["encryption"] = JsonStr(user, "encryption") is { Length: > 0 } enc ? enc : "none";
+            ApplyStream(proxy, stream, JsonStr(user, "flow"));
+            return proxy;
+        }
+
+        if (proto is "hysteria" or "hysteria2")
+        {
+            var version = JsonInt(settings, "version");
+            if (version == 0 && stream.ValueKind == JsonValueKind.Object
+                && stream.TryGetProperty("hysteriaSettings", out var hyVer))
+                version = JsonInt(hyVer, "version");
+            var port = JsonInt(settings, "port");
+            var kind = version == 1 ? "hysteria" : "hysteria2";
+            var proxy = Base(kind, name, JsonStr(settings, "address"), port > 0 ? port : 443);
+            var auth = "";
+            if (stream.ValueKind == JsonValueKind.Object && stream.TryGetProperty("hysteriaSettings", out var hy))
+                auth = JsonStr(hy, "auth");
+            if (auth.Length == 0) auth = JsonStr(settings, "auth");
+            if (kind == "hysteria") proxy["auth-str"] = auth;
+            else proxy["password"] = auth;
+            if (stream.ValueKind == JsonValueKind.Object && stream.TryGetProperty("tlsSettings", out var tls))
+            {
+                var sni = JsonStr(tls, "serverName");
+                if (sni.Length > 0) proxy["sni"] = sni;
+                var fp = JsonStr(tls, "fingerprint");
+                if (fp.Length > 0) proxy["client-fingerprint"] = fp;
+                if (tls.TryGetProperty("alpn", out var alpn) && alpn.ValueKind == JsonValueKind.Array)
+                {
+                    var list = alpn.EnumerateArray().Select(x => x.GetString()).Where(x => !string.IsNullOrWhiteSpace(x)).Cast<object>().ToList();
+                    if (list.Count > 0) proxy["alpn"] = list;
+                }
+            }
+            if (LooksLikeIp(proxy["server"].ToString())) proxy["skip-cert-verify"] = true;
+            return proxy;
+        }
+
+        return null;
+    }
+
+    static void ApplyStream(Dictionary<string, object> proxy, JsonElement stream, string flow)
+    {
+        if (stream.ValueKind != JsonValueKind.Object) return;
+        var network = JsonStr(stream, "network");
+        if (network.Length == 0) network = "tcp";
+        proxy["network"] = network is "ws" or "grpc" or "h2" or "http" ? network : "tcp";
+        if ((network is "tcp" or "") && flow.Length > 0) proxy["flow"] = flow;
+
+        var security = JsonStr(stream, "security");
+        if (security is "reality" or "tls")
+        {
+            proxy["tls"] = true;
+            var tlsName = security == "reality" ? "realitySettings" : "tlsSettings";
+            if (stream.TryGetProperty(tlsName, out var tls))
+            {
+                var sni = JsonStr(tls, "serverName");
+                if (sni.Length > 0) proxy["servername"] = sni;
+                var fp = JsonStr(tls, "fingerprint");
+                if (fp.Length > 0) proxy["client-fingerprint"] = fp;
+                if (security == "reality")
+                {
+                    var reality = new Dictionary<string, object>();
+                    var key = JsonStr(tls, "publicKey");
+                    if (key.Length > 0) reality["public-key"] = key;
+                    var sid = JsonStr(tls, "shortId");
+                    if (sid.Length > 0) reality["short-id"] = sid;
+                    var spider = JsonStr(tls, "spiderX");
+                    if (spider.Length > 0) reality["spider-x"] = spider;
+                    proxy["reality-opts"] = reality;
+                }
+            }
+        }
+
+        if (network == "grpc" && stream.TryGetProperty("grpcSettings", out var grpc))
+        {
+            var service = JsonStr(grpc, "serviceName");
+            if (service.Length > 0)
+                proxy["grpc-opts"] = new Dictionary<string, object> { ["grpc-service-name"] = service };
+        }
+
+        if (network == "ws" && stream.TryGetProperty("wsSettings", out var ws))
+        {
+            var opts = new Dictionary<string, object>();
+            var path = JsonStr(ws, "path");
+            if (path.Length > 0) opts["path"] = path;
+            var host = JsonStr(ws, "host");
+            if (host.Length == 0 && ws.TryGetProperty("headers", out var headers) && headers.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var header in headers.EnumerateObject())
+                {
+                    if (header.Name.Equals("Host", StringComparison.OrdinalIgnoreCase) && header.Value.ValueKind == JsonValueKind.String)
+                        host = header.Value.GetString() ?? "";
+                }
+            }
+            if (host.Length > 0)
+                opts["headers"] = new Dictionary<string, object> { ["Host"] = host };
+            proxy["ws-opts"] = opts;
+        }
+
+        if (LooksLikeIp(proxy["server"].ToString())) proxy["skip-cert-verify"] = true;
+    }
+
+    static string JsonStr(JsonElement el, string key)
+    {
+        if (el.ValueKind != JsonValueKind.Object || !el.TryGetProperty(key, out var value)) return "";
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => (value.GetString() ?? "").Trim(),
+            JsonValueKind.Number => value.ToString(),
+            _ => ""
+        };
+    }
+
+    static int JsonInt(JsonElement el, string key)
+    {
+        if (el.ValueKind != JsonValueKind.Object || !el.TryGetProperty(key, out var value)) return 0;
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var n)) return n;
+        return value.ValueKind == JsonValueKind.String && int.TryParse(value.GetString(), out var p) ? p : 0;
     }
 
     static void RejectNotices(IReadOnlyList<string> names)
