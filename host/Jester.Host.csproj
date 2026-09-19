@@ -11,7 +11,7 @@
     <AssemblyName>Jester</AssemblyName>
     <Product>Jester</Product>
     <Description>Lightweight TUN proxy client</Description>
-    <Version>0.2.2</Version>
+    <Version>0.2.3</Version>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationIcon>Assets\jester.ico</ApplicationIcon>
