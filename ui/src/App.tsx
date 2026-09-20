@@ -23,18 +23,67 @@ const nav = [
   ['appearance', 'appearance', icons.appearance],
 ] as const
 
+function hexToRgb(hex: string): [number, number, number] | null {
+  const raw = hex.trim().replace('#', '')
+  if (!/^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{6}$/.test(raw)) return null
+  const full = raw.length === 3 ? raw.split('').map((c) => c + c).join('') : raw
+  return [parseInt(full.slice(0, 2), 16), parseInt(full.slice(2, 4), 16), parseInt(full.slice(4, 6), 16)]
+}
+
+function rgba(hex: string, alpha: number) {
+  const rgb = hexToRgb(hex)
+  if (!rgb) return `rgba(0,0,0,${alpha})`
+  return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`
+}
+
+function luminance(hex: string) {
+  const rgb = hexToRgb(hex)
+  if (!rgb) return 0
+  const lin = rgb.map((v) => {
+    const c = v / 255
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
+  })
+  return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+}
+
+function mixHex(a: string, b: string, t: number) {
+  const left = hexToRgb(a)
+  const right = hexToRgb(b)
+  if (!left || !right) return a
+  const m = (i: number) => Math.round(left[i] + (right[i] - left[i]) * t)
+  return `#${[m(0), m(1), m(2)].map((n) => n.toString(16).padStart(2, '0')).join('')}`
+}
+
+function wallpaperUrl(src?: string | null) {
+  const value = (src || '').trim()
+  if (!value) return ''
+  if (/^https?:\/\//i.test(value)) return value
+  return `/api/appearance/wallpaper?v=${encodeURIComponent(value.slice(-48))}`
+}
+
 function applyTheme() {
   const a = useApp.getState().settings?.appearance
   if (!a) return
   const r = document.documentElement.style
+  const light = luminance(a.background) > 0.42
   r.setProperty('--bg', a.background)
+  r.setProperty('--bg-elev', light ? mixHex(a.background, '#ffffff', 0.55) : mixHex(a.background, '#ffffff', 0.07))
+  r.setProperty('--surface', rgba(a.text, light ? 0.06 : 0.05))
+  r.setProperty('--surface-2', rgba(a.text, light ? 0.1 : 0.09))
+  r.setProperty('--line', rgba(a.text, light ? 0.16 : 0.14))
+  r.setProperty('--line-soft', rgba(a.text, light ? 0.1 : 0.08))
+  r.setProperty('--text', a.text)
+  r.setProperty('--muted', rgba(a.text, light ? 0.68 : 0.62))
+  r.setProperty('--faint', rgba(a.text, light ? 0.45 : 0.38))
   r.setProperty('--accent', a.accent)
   r.setProperty('--accent-2', a.accentMuted)
-  r.setProperty('--text', a.text)
+  r.setProperty('--panel', light ? rgba(a.text, 0.06) : 'rgba(0, 0, 0, 0.28)')
   r.setProperty('--radius', a.radius + 'px')
   r.setProperty('--blur', '0px')
   r.setProperty('--font-ui', '"Segoe UI Variable Text", "Segoe UI", sans-serif')
   r.setProperty('--font-display', '"Segoe UI Variable Display", "Segoe UI", sans-serif')
+  document.documentElement.dataset.theme = light ? 'light' : 'dark'
+  document.documentElement.style.colorScheme = light ? 'light' : 'dark'
   document.documentElement.dataset.motion = a.animations === false ? 'off' : 'on'
   document.body.style.opacity = String(Math.max(0.92, a.windowOpacity || 1))
 }
@@ -176,7 +225,11 @@ export function App() {
       className={'app' + (settings?.appearance?.glass ? ' glass' : '')}
       data-bg={settings?.appearance?.backgroundStyle || 'mesh'}
       style={settings?.appearance?.backgroundStyle === 'image' && settings.appearance.backgroundImage
-        ? { backgroundImage: `linear-gradient(rgba(11,10,15,.72), rgba(11,10,15,.82)), url(${settings.appearance.backgroundImage})` }
+        ? {
+            backgroundImage: `linear-gradient(color-mix(in srgb, var(--bg) 68%, transparent), color-mix(in srgb, var(--bg) 82%, transparent)), url("${wallpaperUrl(settings.appearance.backgroundImage)}")`,
+            backgroundSize: 'cover',
+            backgroundPosition: 'center',
+          }
         : undefined}
     >
       <header

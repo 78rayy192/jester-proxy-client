@@ -114,6 +114,23 @@ public partial class App : WinApp
             }
             catch { /* ignore */ }
         };
+        WindowActions.PickImage = () =>
+        {
+            try
+            {
+                return Current.Dispatcher.Invoke(() =>
+                {
+                    var dlg = new Microsoft.Win32.OpenFileDialog
+                    {
+                        Title = "Фон окна",
+                        Filter = "Изображения|*.jpg;*.jpeg;*.png;*.webp;*.gif;*.bmp|Все файлы|*.*",
+                        CheckFileExists = true
+                    };
+                    return dlg.ShowDialog(window) == true ? dlg.FileName : null;
+                });
+            }
+            catch { return null; }
+        };
 
         if (_settings.Current.StartHidden) window.Hide();
         else window.Show();

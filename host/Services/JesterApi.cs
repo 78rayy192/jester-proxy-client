@@ -111,6 +111,25 @@ public sealed class JesterApi : IDisposable
                 var appearance = await ReadJson<AppearanceSettings>(ctx) ?? new();
                 await WriteJson(ctx, 200, _settings.Patch(s => s.Appearance = appearance).Appearance);
                 return;
+            case "GET /api/appearance/wallpaper":
+                await ServeWallpaper(ctx);
+                return;
+            case "POST /api/appearance/pick-wallpaper":
+            {
+                var picked = WindowActions.PickImage?.Invoke();
+                if (string.IsNullOrWhiteSpace(picked))
+                {
+                    await WriteJson(ctx, 200, new { cancelled = true });
+                    return;
+                }
+                var nextAppearance = _settings.Patch(s =>
+                {
+                    s.Appearance.BackgroundImage = picked;
+                    s.Appearance.BackgroundStyle = "image";
+                }).Appearance;
+                await WriteJson(ctx, 200, nextAppearance);
+                return;
+            }
             case "GET /api/profiles":
                 await WriteJson(ctx, 200, _profiles.List());
                 return;
@@ -317,7 +336,6 @@ public sealed class JesterApi : IDisposable
         var rest = raw.StartsWith("/clash", StringComparison.OrdinalIgnoreCase) ? raw[6..] : raw;
         if (string.IsNullOrEmpty(rest)) rest = "/";
         var pathOnly = rest.Split('?', 2)[0];
-        // Rebuild query from QueryString to avoid double-encoding issues on delay URLs
         var qs = ctx.Request.Url?.Query ?? "";
         var url = $"http://127.0.0.1:{settings.ExternalPort}{pathOnly}{qs}";
 
@@ -374,6 +392,35 @@ public sealed class JesterApi : IDisposable
         ctx.Response.Close();
     }
 
+    async Task ServeWallpaper(HttpListenerContext ctx)
+    {
+        var raw = _settings.Current.Appearance.BackgroundImage?.Trim().Trim('"');
+        if (string.IsNullOrWhiteSpace(raw)
+            || raw.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+            || raw.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+            || !File.Exists(raw))
+        {
+            ctx.Response.StatusCode = 404;
+            ctx.Response.Close();
+            return;
+        }
+
+        var ext = Path.GetExtension(raw).ToLowerInvariant();
+        if (ext is not (".jpg" or ".jpeg" or ".png" or ".webp" or ".gif" or ".bmp"))
+        {
+            ctx.Response.StatusCode = 400;
+            ctx.Response.Close();
+            return;
+        }
+
+        ctx.Response.StatusCode = 200;
+        ctx.Response.ContentType = Mime(raw);
+        TrySetHeader(ctx.Response.Headers, "Cache-Control", "no-store");
+        await using var fs = File.OpenRead(raw);
+        await fs.CopyToAsync(ctx.Response.OutputStream);
+        ctx.Response.Close();
+    }
+
     async Task ServeUi(HttpListenerContext ctx, string path)
     {
         if (path == "/") path = "/index.html";
@@ -426,6 +473,10 @@ public sealed class JesterApi : IDisposable
         ".json" => "application/json",
         ".svg" => "image/svg+xml",
         ".png" => "image/png",
+        ".jpg" or ".jpeg" => "image/jpeg",
+        ".webp" => "image/webp",
+        ".gif" => "image/gif",
+        ".bmp" => "image/bmp",
         ".woff2" => "font/woff2",
         _ => "application/octet-stream"
     };
@@ -463,4 +514,5 @@ public static class WindowActions
     public static Action<bool>? CloseOrTray { get; set; }
     public static Action? Drag { get; set; }
     public static Action? ApplyCapture { get; set; }
+    public static Func<string?>? PickImage { get; set; }
 }
