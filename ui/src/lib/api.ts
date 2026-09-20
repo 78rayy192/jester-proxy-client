@@ -146,6 +146,7 @@ export const api = {
   saveSettings: (s: AppSettings) => req<AppSettings>('/api/settings', { method: 'PUT', body: JSON.stringify(s) }),
   appearance: () => req<Appearance>('/api/appearance'),
   saveAppearance: (a: Appearance) => req<Appearance>('/api/appearance', { method: 'PUT', body: JSON.stringify(a) }),
+  pickWallpaper: () => req<Appearance | { cancelled: true }>('/api/appearance/pick-wallpaper', { method: 'POST' }),
   profiles: () => req<Profile[]>('/api/profiles'),
   createProfile: (body: { name: string; kind: string; payload?: string; source?: string }) =>
     req<Profile>('/api/profiles', { method: 'POST', body: JSON.stringify(body) }),
