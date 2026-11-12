@@ -9,6 +9,7 @@ namespace Jester.Host.Services;
 
 public sealed class CoreManager : IDisposable
 {
+    static readonly SocketsHttpHandler LocalHttpHandler = new() { UseProxy = false, PooledConnectionLifetime = TimeSpan.FromMinutes(2) };
     readonly SettingsStore _settings;
     readonly ProfileStore _profiles;
     readonly CoreDownloader _downloader;
@@ -16,10 +17,21 @@ public sealed class CoreManager : IDisposable
     readonly SemaphoreSlim _lifecycle = new(1, 1);
     Process? _process;
     string _coreVersion = "";
+    readonly object _versionGate = new();
+    DateTime _versionFileStamp;
+    DateTime _lastVersionAttempt;
+    volatile bool _stopping;
+    int _restartAttempts;
+    CancellationTokenSource? _runIntent;
+    bool _ready;
+    bool _disposed;
+    DateTimeOffset _onlineAt;
     static readonly ConcurrentQueue<string> LogBuffer = new();
     static readonly object LogGate = new();
     static System.Threading.Timer? LogTimer;
+    static volatile bool SuppressLogs;
     public string ApiSecret { get; private set; } = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+    public NetworkGuardian? Guardian { get; set; }
 
     public CoreDownloader Downloader => _downloader;
     public bool Running { get { lock (_gate) return _process is { HasExited: false }; } }
@@ -30,6 +42,8 @@ public sealed class CoreManager : IDisposable
         _settings = settings;
         _profiles = profiles;
         _downloader = downloader;
+        var s = settings.Current;
+        SuppressLogs = s.SilentLogs || s.StealthMode;
     }
 
     public CoreStatus Snapshot()
@@ -46,6 +60,7 @@ public sealed class CoreManager : IDisposable
             NeedsAdmin = s.TunEnabled && !admin,
             Pid = Pid,
             Version = ReadCoreVersion(),
+            AppVersion = AppUpdateChecker.CurrentVersion,
             DownloadProgress = _downloader.Progress,
             ActiveProfileId = s.ActiveProfileId,
             Mode = s.Mode,
@@ -55,10 +70,34 @@ public sealed class CoreManager : IDisposable
 
     public async Task<CoreStatus> StartAsync(CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
+        CancellationToken runToken;
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            _runIntent?.Cancel();
+            _runIntent?.Dispose();
+            _runIntent = new CancellationTokenSource();
+            runToken = _runIntent.Token;
+            _restartAttempts = 0;
+        }
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, runToken);
+        // Lifecycle work must not resume on the caller's WPF/tray context:
+        // Stop is synchronous and may need to wait for this task during window exit.
+        return await Task.Run(() => StartCoreAsync(linked.Token), linked.Token).ConfigureAwait(false);
+    }
+
+    async Task<CoreStatus> StartCoreAsync(CancellationToken ct, Process? expectedProcess = null)
+    {
         await _lifecycle.WaitAsync(ct);
         try
         {
+            ct.ThrowIfCancellationRequested();
+            lock (_gate)
+                if (expectedProcess != null && (!_ready || !ReferenceEquals(_process, expectedProcess)))
+                    return Snapshot();
             var s = _settings.Current;
+            SuppressLogs = s.SilentLogs || s.StealthMode;
             if (!File.Exists(AppPaths.MihomoExe))
                 throw new InvalidOperationException("Ядро не установлено.");
             if (string.IsNullOrWhiteSpace(s.ActiveProfileId))
@@ -70,14 +109,22 @@ public sealed class CoreManager : IDisposable
                 ?? throw new InvalidOperationException("Активный профиль не найден.");
             var yaml = await File.ReadAllTextAsync(_profiles.ConfigPath(profile.Id), ct);
 
-            try { await RuleListService.EnsureAsync(s, ct); }
-            catch (Exception ex) { AppendLog("rule-list: " + ex.Message); }
+            var effective = NetworkPersonas.PrepareForBuild(s, profile);
+            try { await RuleListService.EnsureAsync(effective, ct); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex) { AppendLog("rule-list-effective: " + ex.Message); }
 
-            var merged = ConfigBuilder.Merge(yaml, s, ApiSecret);
+            var merged = ConfigBuilder.Merge(yaml, effective, ApiSecret);
             AppPaths.Ensure();
             await File.WriteAllTextAsync(AppPaths.RuntimeConfig, merged, ct);
 
-            StopUnlocked();
+            lock (_gate)
+                if (expectedProcess != null && !ReferenceEquals(_process, expectedProcess))
+                    return Snapshot();
+
+            _stopping = true;
+            try { StopUnlocked(preserveGuard: _settings.Current.DeadManArmed); }
+            finally { _stopping = false; }
             CopyWintunBesideCore();
 
             var psi = new ProcessStartInfo
@@ -92,36 +139,52 @@ public sealed class CoreManager : IDisposable
             };
             psi.Environment["DISABLE_LOOPBACK_DETECTOR"] = "1";
 
-            var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
+            ct.ThrowIfCancellationRequested();
+            var proc = new Process { StartInfo = psi };
             proc.OutputDataReceived += (_, e) => { if (e.Data != null) AppendLog(e.Data); };
             proc.ErrorDataReceived += (_, e) => { if (e.Data != null) AppendLog(e.Data); };
             proc.Exited += (_, _) => OnCoreExited(proc);
-            if (!proc.Start()) throw new InvalidOperationException("Не удалось запустить ядро.");
             try
             {
-                proc.PriorityClass = s.HighPriority ? ProcessPriorityClass.High : ProcessPriorityClass.Normal;
+                if (!proc.Start()) throw new InvalidOperationException("Не удалось запустить ядро.");
+                lock (_gate) { _process = proc; _ready = false; }
             }
-            catch { /* no rights */ }
-            proc.BeginOutputReadLine();
-            proc.BeginErrorReadLine();
-            EnsureLogFlusher();
-            lock (_gate) _process = proc;
-
+            catch { proc.Dispose(); throw; }
             try
             {
-                await WaitReady(s.ExternalPort, ct);
+                try { proc.PriorityClass = s.HighPriority ? ProcessPriorityClass.High : ProcessPriorityClass.Normal; }
+                catch { /* no rights */ }
+                proc.BeginOutputReadLine();
+                proc.BeginErrorReadLine();
+                proc.EnableRaisingEvents = true;
+                EnsureLogFlusher();
+                await WaitReady(proc, s.ExternalPort, ct);
+                lock (_gate)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (!ReferenceEquals(_process, proc) || proc.HasExited)
+                        throw new InvalidOperationException("Ядро завершилось при старте. Смотрите журнал.");
+                    // Commit the proxy and online state together, so an exit cannot have its
+                    // fail-closed proxy overwritten by the remainder of startup.
+                    if (s.SystemProxy && !s.TunEnabled)
+                        SystemProxy.Set(true, s.MixedPort);
+                    else
+                        SystemProxy.Set(false, 0);
+                    ct.ThrowIfCancellationRequested();
+                    if (proc.HasExited)
+                        throw new InvalidOperationException("Ядро завершилось при старте. Смотрите журнал.");
+                    _ready = true;
+                    _onlineAt = DateTimeOffset.UtcNow;
+                    Guardian?.OnCoreOnline();
+                }
             }
             catch
             {
-                StopUnlocked();
+                _stopping = true;
+                try { StopUnlocked(preserveGuard: _settings.Current.DeadManArmed); }
+                finally { _stopping = false; }
                 throw;
             }
-
-            // TUN already captures all traffic — system proxy on top = double hop / slow.
-            if (s.SystemProxy && !s.TunEnabled)
-                SystemProxy.Set(true, s.MixedPort);
-            else
-                SystemProxy.Set(false, 0);
 
             return Snapshot();
         }
@@ -130,34 +193,96 @@ public sealed class CoreManager : IDisposable
 
     void OnCoreExited(Process proc)
     {
+        bool intentional;
+        bool wasReady;
+        CancellationToken runToken;
         lock (_gate)
         {
             if (!ReferenceEquals(_process, proc)) return;
+            intentional = _stopping;
+            wasReady = _ready;
+            _ready = false;
             _process = null;
+            runToken = _runIntent?.Token ?? new CancellationToken(true);
+            if (wasReady && DateTimeOffset.UtcNow - _onlineAt > TimeSpan.FromSeconds(30)) _restartAttempts = 0;
+            // Complete this process's proxy transition before a replacement commits.
+            try
+            {
+                Guardian?.OnCoreStopped();
+                if (!intentional && _settings.Current.DeadManSwitch)
+                    Guardian?.OnUnexpectedCoreExit();
+                else
+                    SystemProxy.Set(false, 0);
+            }
+            catch { /* ignore */ }
         }
-        try { SystemProxy.Set(false, 0); } catch { /* ignore */ }
+        try { proc.Dispose(); } catch { /* ignore */ }
         FlushLog();
+        if (intentional)
+        {
+            AppendLog("core stopped");
+            return;
+        }
         AppendLog("core exited unexpectedly");
+        if (!wasReady || !_settings.Current.AutoRestartCore || runToken.IsCancellationRequested) return;
+        _ = RecoverAsync(runToken);
+    }
+
+    async Task RecoverAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested && _restartAttempts < 3)
+        {
+            try
+            {
+                var attempt = Interlocked.Increment(ref _restartAttempts);
+                var delay = Math.Min(8000, 1500 * attempt);
+                AppendLog($"auto-restart in {delay}ms (attempt {attempt})");
+                await Task.Delay(delay, ct);
+                await StartCoreAsync(ct);
+                AppendLog("auto-restart succeeded");
+                return;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
+            catch (Exception ex)
+            {
+                AppendLog("auto-restart failed: " + ex.Message);
+            }
+        }
+        if (!ct.IsCancellationRequested) AppendLog("auto-restart aborted after 3 attempts");
     }
 
     public void Stop()
     {
-        if (!_lifecycle.Wait(8000)) return;
-        try { StopUnlocked(); }
-        finally { _lifecycle.Release(); }
+        lock (_gate) { _runIntent?.Cancel(); }
+        if (!_lifecycle.Wait(8000))
+            throw new TimeoutException("Остановка подключения ещё выполняется. Повторите отключение.");
+        try
+        {
+            _stopping = true;
+            StopUnlocked();
+            if (_settings.Current.DeadManArmed) Guardian?.DisarmFailClosed();
+        }
+        finally
+        {
+            _stopping = false;
+            _lifecycle.Release();
+        }
     }
 
-    void StopUnlocked()
+    void StopUnlocked(bool preserveGuard = false)
     {
         Process? proc;
         lock (_gate)
         {
             proc = _process;
             _process = null;
+            _ready = false;
         }
+        Guardian?.OnCoreStopped();
         if (proc == null)
         {
-            try { SystemProxy.Set(false, 0); } catch { /* ignore */ }
+            if (!preserveGuard)
+                try { SystemProxy.Set(false, 0); } catch { /* ignore */ }
             return;
         }
         try
@@ -172,7 +297,8 @@ public sealed class CoreManager : IDisposable
         finally { try { proc.Dispose(); } catch { /* ignore */ } }
 
         FlushLog();
-        try { SystemProxy.Set(false, 0); } catch { /* ignore */ }
+        if (!preserveGuard)
+            try { SystemProxy.Set(false, 0); } catch { /* ignore */ }
         if (_settings.Current.SilentLogs || _settings.Current.StealthMode)
         {
             try
@@ -201,43 +327,33 @@ public sealed class CoreManager : IDisposable
             return result;
         }
 
-        var port = s.MixedPort;
-        if (!s.TunEnabled)
+        async Task<string?> ReadIpAsync(bool throughProxy)
         {
             try
             {
-                using var handler = new HttpClientHandler { UseProxy = false, Proxy = null };
-                using var direct = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(8) };
-                result.RealIp = (await direct.GetStringAsync("https://api.ipify.org", ct)).Trim();
+                using var handler = new HttpClientHandler
+                {
+                    UseProxy = throughProxy,
+                    Proxy = throughProxy ? new WebProxy($"http://127.0.0.1:{s.MixedPort}") : null
+                };
+                using var client = new HttpClient(handler)
+                {
+                    Timeout = TimeSpan.FromSeconds(12),
+                    MaxResponseContentBufferSize = 1024
+                };
+                var text = (await client.GetStringAsync("https://api.ipify.org", ct)).Trim();
+                return IPAddress.TryParse(text, out var ip) ? ip.ToString() : null;
             }
-            catch (Exception)
-            {
-                result.RealIp = null;
-                result.Message = "Не удалось определить внешний адрес.";
-            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch { return null; }
         }
-        else
-        {
-            result.RealIp = null;
-            result.Message = "Туннель включён. Сравнивается адрес выхода и состояние защиты.";
-        }
-
-        try
-        {
-            using var handler = new HttpClientHandler
-            {
-                Proxy = new WebProxy($"http://127.0.0.1:{port}"),
-                UseProxy = true
-            };
-            using var via = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(12) };
-            result.ExitIp = (await via.GetStringAsync("https://api.ipify.org", ct)).Trim();
-        }
-        catch (Exception)
-        {
-            result.ExitIp = null;
-            if (string.IsNullOrEmpty(result.Message) || result.Message.StartsWith("Туннель", StringComparison.Ordinal))
-                result.Message = "Не удалось определить адрес выхода.";
-        }
+        var directTask = s.TunEnabled ? Task.FromResult<string?>(null) : ReadIpAsync(false);
+        var exitTask = ReadIpAsync(true);
+        await Task.WhenAll(directTask, exitTask);
+        result.RealIp = await directTask;
+        result.ExitIp = await exitTask;
+        if (result.ExitIp == null) result.Message = "Не удалось определить адрес выхода.";
+        else if (!s.TunEnabled && result.RealIp == null) result.Message = "Не удалось определить исходный адрес для сравнения.";
 
         bool? maskedSignal = null;
         if (!s.TunEnabled && !string.IsNullOrEmpty(result.RealIp) && !string.IsNullOrEmpty(result.ExitIp))
@@ -250,15 +366,12 @@ public sealed class CoreManager : IDisposable
         }
         else if (s.TunEnabled && !string.IsNullOrEmpty(result.ExitIp))
         {
-            result.Masked = true;
-            maskedSignal = true;
-            if (string.IsNullOrEmpty(result.Message) || result.Message.StartsWith("TUN", StringComparison.Ordinal))
-                result.Message = "Туннель активен. Адрес выхода получен.";
+            // An egress address alone cannot prove that it differs from the ISP address.
+            result.Message = "Адрес выхода получен. В режиме туннеля сравнение с исходным IP недоступно; отсутствие утечек не подтверждено.";
         }
 
-        // Local UDP probes: closed = good for anti-QUIC / anti-STUN posture (best-effort).
-        result.Checks.Add(await ProbeUdpBlockedAsync("Блокировка QUIC", 443, s.BlockQuic, ct));
-        result.Checks.Add(await ProbeUdpBlockedAsync("Блокировка STUN", 3478, s.BlockStun, ct));
+        // An unanswered arbitrary UDP datagram does not verify QUIC/STUN blocking.
+        // Report the configured policy without sending misleading external probes.
 
         result.Score = ScoreFromChecks(result.Checks, maskedSignal, Running);
         if (result.Score >= 85 && string.IsNullOrEmpty(result.Message))
@@ -272,15 +385,15 @@ public sealed class CoreManager : IDisposable
     static List<GhostCheck> BuildShieldChecks(AppSettings s) =>
     [
         new() { Id = "stealth", Label = "Режим защиты", Ok = s.StealthMode, Weight = 12 },
-        new() { Id = "quic", Label = "Блокировка QUIC", Ok = s.BlockQuic, Weight = 10 },
-        new() { Id = "stun", Label = "Блокировка STUN", Ok = s.BlockStun, Weight = 10 },
-        new() { Id = "dns", Label = "DNS через туннель", Ok = s.DnsViaProxy, Weight = 12 },
-        new() { Id = "dns-rules", Label = "DNS по правилам", Ok = s.DnsRespectRules, Weight = 6 },
+        new() { Id = "quic", Label = "Блокировка QUIC", Ok = (s.BlockQuic || s.StealthMode) && s.Mode.Equals("rule", StringComparison.OrdinalIgnoreCase), Weight = 10, Detail = "Политика действует в режиме по правилам; внешняя утечка не проверялась" },
+        new() { Id = "stun", Label = "Блокировка STUN", Ok = (s.BlockStun || s.StealthMode) && s.Mode.Equals("rule", StringComparison.OrdinalIgnoreCase), Weight = 10, Detail = "Политика действует в режиме по правилам; внешняя утечка не проверялась" },
+        new() { Id = "dns", Label = "DNS через туннель", Ok = s.DnsViaProxy || s.StealthMode, Weight = 12 },
+        new() { Id = "dns-rules", Label = "DNS по правилам", Ok = s.DnsRespectRules || s.StealthMode, Weight = 6 },
         new() { Id = "tls", Label = "Случайный TLS", Ok = s.RandomFingerprint, Weight = 8 },
-        new() { Id = "lan", Label = "Локальная сеть закрыта", Ok = !s.AllowLan, Weight = 8 },
-        new() { Id = "ipv6", Label = "IPv6 отключён", Ok = !s.Ipv6, Weight = 6 },
-        new() { Id = "logs", Label = "Журнал отключён", Ok = s.SilentLogs, Weight = 5 },
-        new() { Id = "capture", Label = "Захват экрана отключён", Ok = s.HideFromCapture || s.StealthMode, Weight = 8 },
+        new() { Id = "lan", Label = "Локальная сеть закрыта", Ok = !s.AllowLan || s.StealthMode, Weight = 8 },
+        new() { Id = "ipv6", Label = "IPv6 отключён", Ok = !s.Ipv6 || s.StealthMode, Weight = 6 },
+        new() { Id = "logs", Label = "Журнал отключён", Ok = s.SilentLogs || s.StealthMode, Weight = 5 },
+        new() { Id = "capture", Label = "Защита от захвата экрана", Ok = false, Weight = 0, Detail = "Недоступна в текущем окне WebView2" },
         new() { Id = "mrs", Label = "Бинарные правила", Ok = s.UseMrsRules, Weight = 5 },
         new() { Id = "tun", Label = "Системный туннель", Ok = s.TunEnabled, Weight = 10 },
     ];
@@ -294,36 +407,6 @@ public sealed class CoreManager : IDisposable
         if (running && masked == false) score = Math.Max(0, score - 25);
         if (!running) score = Math.Max(0, score - 20);
         return Math.Clamp(score, 0, 100);
-    }
-
-    static async Task<GhostCheck> ProbeUdpBlockedAsync(string label, int port, bool expectedBlocked, CancellationToken ct)
-    {
-        if (!expectedBlocked)
-            return new GhostCheck { Id = "udp-" + port, Label = label, Ok = false, Weight = 6, Detail = "Отключено в параметрах" };
-
-        try
-        {
-            using var udp = new UdpClient();
-            udp.Client.SendTimeout = 400;
-            udp.Client.ReceiveTimeout = 400;
-            await udp.SendAsync(new byte[] { 0 }, 1, "1.1.1.1", port);
-            var receive = udp.ReceiveAsync();
-            var done = await Task.WhenAny(receive, Task.Delay(350, ct));
-            var answered = done == receive && !receive.IsFaulted;
-            // If something answers quickly, block may be ineffective; no answer is OK/inconclusive → treat as ok.
-            return new GhostCheck
-            {
-                Id = "udp-" + port,
-                Label = label,
-                Ok = !answered,
-                Weight = 6,
-                Detail = answered ? "Получен внешний ответ" : "Ответа нет"
-            };
-        }
-        catch
-        {
-            return new GhostCheck { Id = "udp-" + port, Label = label, Ok = true, Weight = 6, Detail = "Порт недоступен" };
-        }
     }
 
     /// <summary>Vanish: stop core, wipe logs, clear proxy, hide from capture, tray.</summary>
@@ -390,7 +473,7 @@ public sealed class CoreManager : IDisposable
         }
 
         var port = _settings.Current.ExternalPort;
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(90) };
+        using var http = new HttpClient(LocalHttpHandler, disposeHandler: false) { Timeout = TimeSpan.FromSeconds(90) };
         http.DefaultRequestHeaders.TryAddWithoutValidation("Authorization", "Bearer " + ApiSecret);
 
         // Put PROXY on RUSH group
@@ -442,7 +525,8 @@ public sealed class CoreManager : IDisposable
                 {
                     using var put = new HttpRequestMessage(HttpMethod.Put, $"http://127.0.0.1:{port}/proxies/{Uri.EscapeDataString(group)}");
                     put.Content = new StringContent($"{{\"name\":{System.Text.Json.JsonSerializer.Serialize(best)}}}", System.Text.Encoding.UTF8, "application/json");
-                    await http.SendAsync(put, ct);
+                    using var putRes = await http.SendAsync(put, ct);
+                    if (group == "PROXY") putRes.EnsureSuccessStatusCode();
                 }
                 result.Node = best;
                 result.DelayMs = bestDelay;
@@ -477,7 +561,7 @@ public sealed class CoreManager : IDisposable
         }
 
         var port = _settings.Current.ExternalPort;
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+        using var http = new HttpClient(LocalHttpHandler, disposeHandler: false) { Timeout = TimeSpan.FromSeconds(15) };
         http.DefaultRequestHeaders.TryAddWithoutValidation("Authorization", "Bearer " + ApiSecret);
         using var res = await http.GetAsync($"http://127.0.0.1:{port}/connections", ct);
         res.EnsureSuccessStatusCode();
@@ -580,16 +664,23 @@ public sealed class CoreManager : IDisposable
         return parts[^2] + "." + parts[^1];
     }
 
-    public async Task<CoreStatus> RestartAsync(CancellationToken ct = default)
+    public Task<CoreStatus> RestartAsync(CancellationToken ct = default) => StartAsync(ct);
+
+    /// <summary>Replace only the currently online core, honoring a later user disconnect.</summary>
+    public async Task<CoreStatus> RestartIfRunningAsync(CancellationToken ct = default)
     {
-        await _lifecycle.WaitAsync(ct);
-        try
+        Process current;
+        CancellationToken runToken;
+        lock (_gate)
         {
-            StopUnlocked();
-            await Task.Delay(250, ct);
+            if (!_ready || _process is null || _runIntent is null) return Snapshot();
+            current = _process;
+            runToken = _runIntent.Token;
         }
-        finally { _lifecycle.Release(); }
-        return await StartAsync(ct);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, runToken);
+        // StartCoreAsync serializes the lifecycle and stops this exact old process
+        // before starting its replacement; it never creates a second live core.
+        return await Task.Run(() => StartCoreAsync(linked.Token, expectedProcess: current), linked.Token).ConfigureAwait(false);
     }
 
     public void Elevate()
@@ -607,16 +698,16 @@ public sealed class CoreManager : IDisposable
             System.Windows.Application.Current.Shutdown());
     }
 
-    async Task WaitReady(int port, CancellationToken ct)
+    async Task WaitReady(Process process, int port, CancellationToken ct)
     {
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(1) };
+        using var http = new HttpClient(new SocketsHttpHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(1) };
         var url = $"http://127.0.0.1:{port}/version";
         for (var i = 0; i < 25; i++)
         {
             ct.ThrowIfCancellationRequested();
             lock (_gate)
             {
-                if (_process is { HasExited: true })
+                if (!ReferenceEquals(_process, process) || process.HasExited)
                     throw new InvalidOperationException("Ядро завершилось при старте. Смотрите журнал.");
             }
             try
@@ -626,7 +717,9 @@ public sealed class CoreManager : IDisposable
                 using var res = await http.SendAsync(req, ct);
                 if (res.IsSuccessStatusCode) return;
             }
-            catch { /* retry */ }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (HttpRequestException) { /* retry */ }
+            catch (TaskCanceledException) { /* request timeout, retry */ }
             await Task.Delay(200, ct);
         }
         throw new InvalidOperationException("Ядро не ответило на Clash API.");
@@ -643,8 +736,21 @@ public sealed class CoreManager : IDisposable
 
     string ReadCoreVersion()
     {
-        if (!string.IsNullOrEmpty(_coreVersion)) return _coreVersion;
         if (!File.Exists(AppPaths.MihomoExe)) return "";
+        lock (_versionGate)
+        {
+            var stamp = File.GetLastWriteTimeUtc(AppPaths.MihomoExe);
+            if (stamp == _versionFileStamp && (!string.IsNullOrEmpty(_coreVersion)
+                || DateTime.UtcNow - _lastVersionAttempt < TimeSpan.FromSeconds(30)))
+                return _coreVersion;
+            _versionFileStamp = stamp;
+            _lastVersionAttempt = DateTime.UtcNow;
+            return ReadCoreVersionUncached();
+        }
+    }
+
+    string ReadCoreVersionUncached()
+    {
         Process? p = null;
         try
         {
@@ -657,12 +763,12 @@ public sealed class CoreManager : IDisposable
                 RedirectStandardOutput = true
             });
             if (p == null) return "";
-            var text = p.StandardOutput.ReadToEnd();
+            var firstLine = p.StandardOutput.ReadLineAsync();
             if (!p.WaitForExit(2000))
             {
                 try { p.Kill(true); } catch { /* ignore */ }
             }
-            _coreVersion = text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
+            _coreVersion = firstLine.Wait(500) ? firstLine.GetAwaiter().GetResult() ?? "" : "";
         }
         catch { _coreVersion = ""; }
         finally { try { p?.Dispose(); } catch { /* ignore */ } }
@@ -675,7 +781,7 @@ public sealed class CoreManager : IDisposable
         if (!Running) return result;
 
         var port = _settings.Current.ExternalPort;
-        using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(3) };
+        using var http = new HttpClient(LocalHttpHandler, disposeHandler: false) { Timeout = TimeSpan.FromMinutes(3) };
         http.DefaultRequestHeaders.TryAddWithoutValidation("Authorization", "Bearer " + ApiSecret);
 
         foreach (var group in new[] { "AUTO", "PROXY" })
@@ -743,17 +849,23 @@ public sealed class CoreManager : IDisposable
 
     static void EnsureLogFlusher()
     {
-        LogTimer ??= new System.Threading.Timer(_ => FlushLog(), null, 400, 400);
+        if (SuppressLogs) return;
+        lock (LogGate)
+            LogTimer ??= new System.Threading.Timer(_ => FlushLog(), null, 1000, 1000);
     }
 
     static void AppendLog(string line)
     {
+        if (SuppressLogs) return;
         LogBuffer.Enqueue($"[{DateTime.Now:HH:mm:ss}] {line}");
         if (LogBuffer.Count > 80) FlushLog();
     }
 
+    public static void AppendLogPublic(string line) => AppendLog(line);
+
     static void FlushLog()
     {
+        if (SuppressLogs) { LogBuffer.Clear(); return; }
         if (LogBuffer.IsEmpty) return;
         lock (LogGate)
         {
@@ -762,7 +874,12 @@ public sealed class CoreManager : IDisposable
                 var sb = new System.Text.StringBuilder();
                 while (LogBuffer.TryDequeue(out var line))
                     sb.AppendLine(line);
-                if (sb.Length > 0) File.AppendAllText(AppPaths.CoreLog, sb.ToString());
+                if (sb.Length > 0)
+                {
+                    if (File.Exists(AppPaths.CoreLog) && new FileInfo(AppPaths.CoreLog).Length > 2 * 1024 * 1024)
+                        File.WriteAllText(AppPaths.CoreLog, ReadLogTail(500));
+                    File.AppendAllText(AppPaths.CoreLog, sb.ToString());
+                }
             }
             catch { /* ignore */ }
         }
@@ -770,14 +887,32 @@ public sealed class CoreManager : IDisposable
 
     public static string ReadLogTail(int lines = 250)
     {
+        if (SuppressLogs) return "";
         if (!File.Exists(AppPaths.CoreLog)) return "";
         using var fs = new FileStream(AppPaths.CoreLog, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-        using var reader = new StreamReader(fs);
-        var all = reader.ReadToEnd().Split('\n');
-        return string.Join('\n', all.TakeLast(lines));
+        return ReadLogTail(fs, lines);
     }
 
-    public void Dispose() => Stop();
+    internal static string ReadLogTail(Stream fs, int lines)
+    {
+        // Bound each poll's allocation even when an older installation has a very large journal.
+        const int maxTailBytes = 256 * 1024;
+        var skipped = fs.Length > maxTailBytes;
+        if (skipped) fs.Seek(-maxTailBytes, SeekOrigin.End);
+        using var reader = new StreamReader(fs, System.Text.Encoding.UTF8, true, 1024, leaveOpen: true);
+        if (skipped) reader.ReadLine(); // Discard an incomplete UTF-8 sequence / first line.
+        var all = reader.ReadToEnd().Split('\n');
+        return string.Join('\n', all.TakeLast(Math.Clamp(lines, 1, 2000)));
+    }
+
+    public void Dispose()
+    {
+        lock (_gate) { _disposed = true; }
+        Stop();
+        lock (_gate) { _runIntent?.Dispose(); _runIntent = null; }
+        lock (LogGate) { LogTimer?.Dispose(); LogTimer = null; }
+        FlushLog();
+    }
 
     /// <summary>Hot-swap mixed/socks/api ports, skip occupied ones, restart core and refresh system proxy.</summary>
     public async Task<PortApplyResult> ApplyPortsAsync(int mixed, int socks, int external, CancellationToken ct = default)
@@ -795,7 +930,6 @@ public sealed class CoreManager : IDisposable
         }
 
         var wasRunning = Running;
-        var wantProxy = _settings.Current.SystemProxy && !_settings.Current.TunEnabled;
         if (wasRunning) Stop();
 
         var busy = new List<int>();
@@ -819,11 +953,6 @@ public sealed class CoreManager : IDisposable
             s.SocksPort = socks;
             s.ExternalPort = external;
         });
-
-        if (wantProxy)
-        {
-            try { SystemProxy.Set(true, mixed); } catch { /* ignore */ }
-        }
 
         if (wasRunning)
         {

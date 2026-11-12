@@ -6,6 +6,7 @@ export type CoreStatus = {
   needsAdmin: boolean
   pid: number
   version: string
+  appVersion?: string
   message: string
   downloadProgress: number
   activeProfileId: string
@@ -23,6 +24,7 @@ export type Appearance = {
   backgroundImage?: string | null
   glass: boolean
   glassBlur: number
+  glassTintOpacity?: number
   radius: number
   windowOpacity: number
   fontUi: string
@@ -101,6 +103,46 @@ export type AppSettings = {
   hideFromCapture?: boolean
   rfRushMode?: boolean
   preferRushLane?: boolean
+  autoUpdateSubscriptions?: boolean
+  autoUpdateIntervalHours?: number
+  lastSubscriptionUpdateAt?: string | null
+  favoriteNodes?: string[]
+  lastSelectedNode?: string
+  firstRunCompleted?: boolean
+  connectionHighlight?: boolean
+  autoRestartCore?: boolean
+  performancePreset?: string
+  networkPersona?: string
+  adaptiveLane?: boolean
+  adaptiveLaneBadRttMs?: number
+  adaptiveLaneGoodRttMs?: number
+  adaptiveLaneIntervalSec?: number
+  perAppFastPath?: boolean
+  fastPathProcesses?: string
+  warmStart?: boolean
+  splitUdpPolicy?: boolean
+  udpFastPorts?: string
+  trafficPadding?: boolean
+  dnsDiversity?: boolean
+  dnsStrictNoFallback?: boolean
+  dnsRotateHours?: number
+  dnsPoolIndex?: number
+  exitConsistencyCheck?: boolean
+  exitCheckIntervalSec?: number
+  exitCheckAction?: string
+  lastKnownExitIp?: string | null
+  lastKnownExitOrg?: string | null
+  deadManSwitch?: boolean
+  deadManArmed?: boolean
+  smartDirectMap?: boolean
+  smartDirectMinHits?: number
+  smartDirectDomains?: string[]
+  latencyBudgetEnabled?: boolean
+  latencyBudgetMs?: number
+  latencyBudgetAction?: string
+  adaptiveLaneState?: string
+  lastMeasuredRttMs?: number
+  guardianMessage?: string
 }
 
 export type RuleListStatus = {
@@ -122,21 +164,33 @@ export type Profile = {
   source: string
   updatedAt: string
   bytes: number
+  upload?: number
+  download?: number
+  total?: number
+  expireUnix?: number
+  hwidLimited?: boolean
+  updateIntervalHours?: number
+  fingerprintOverride?: string | null
+  nameserverOverride?: string[] | null
 }
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
+async function req<T>(path: string, init?: RequestInit, timeoutMs = 30000): Promise<T> {
   const res = await fetch(path, {
     ...init,
     headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
+    signal: init?.signal
+      ? AbortSignal.any([init.signal, AbortSignal.timeout(timeoutMs)])
+      : AbortSignal.timeout(timeoutMs),
   })
   if (!res.ok) {
     let msg = res.statusText
     try {
       const j = await res.json()
-      msg = j.error || msg
+      msg = j.error || j.message || msg
     } catch { /* text */ }
     throw new Error(msg)
   }
+  if (res.status === 204) return undefined as T
   return res.json() as Promise<T>
 }
 
@@ -149,15 +203,36 @@ export const api = {
   pickWallpaper: () => req<Appearance | { cancelled: true }>('/api/appearance/pick-wallpaper', { method: 'POST' }),
   profiles: () => req<Profile[]>('/api/profiles'),
   createProfile: (body: { name: string; kind: string; payload?: string; source?: string }) =>
-    req<Profile>('/api/profiles', { method: 'POST', body: JSON.stringify(body) }),
+    req<Profile>('/api/profiles', { method: 'POST', body: JSON.stringify(body) }, 45000),
   activateProfile: (id: string) => req('/api/profiles/' + id + '/activate', { method: 'POST' }),
-  updateProfile: (id: string) => req<Profile>('/api/profiles/' + id + '/update', { method: 'POST' }),
+  updateProfile: (id: string) => req<Profile>('/api/profiles/' + id + '/update', { method: 'POST' }, 60000),
+  updateAllProfiles: () => req<{ updated: number; failed: number; errors: string[] }>('/api/profiles/update-all', { method: 'POST' }, 180000),
   renameProfile: (id: string, name: string) => req<Profile>('/api/profiles/' + id, { method: 'PUT', body: JSON.stringify({ name }) }),
+  patchProfile: (id: string, body: { name?: string; fingerprintOverride?: string | null; nameserverOverride?: string | string[] | null }) =>
+    req<Profile>('/api/profiles/' + id, { method: 'PUT', body: JSON.stringify(body) }),
   deleteProfile: (id: string) => req('/api/profiles/' + id, { method: 'DELETE' }),
-  start: () => req<CoreStatus>('/api/core/start', { method: 'POST' }),
+  exportSettings: () => req<AppSettings>('/api/settings/export'),
+  importSettings: (s: AppSettings) => req<AppSettings>('/api/settings/import', { method: 'POST', body: JSON.stringify(s) }),
+  checkUpdate: () => req<{ current: string; latest?: string; updateAvailable: boolean; releaseUrl?: string; downloadUrl?: string; message: string }>('/api/app/update'),
+  applyPreset: (name: 'speed' | 'stability' | 'protection') => req<AppSettings>('/api/presets/' + name, { method: 'POST' }),
+  applyPersona: (name: 'auto' | 'home' | 'mobile' | 'corporate') => req<AppSettings>('/api/persona/' + name, { method: 'POST' }),
+  guardian: () => req<{
+    message: string
+    lane: string
+    rttMs: number
+    deadManArmed: boolean
+    exitIp?: string | null
+    exitOrg?: string | null
+    smartDirect: string[]
+    dnsPoolIndex: number
+  }>('/api/guardian'),
+  disarmDeadMan: () => req<{ ok: boolean; deadManArmed: boolean }>('/api/guardian/disarm', { method: 'POST' }),
+  warmStart: () => req<{ ok: boolean }>('/api/guardian/warm', { method: 'POST' }),
+  learnDirect: () => req<{ ok: boolean; message: string; domains?: string[] }>('/api/guardian/learn-direct', { method: 'POST' }),
+  start: () => req<CoreStatus>('/api/core/start', { method: 'POST' }, 90000),
   stop: () => req<CoreStatus>('/api/core/stop', { method: 'POST' }),
-  restart: () => req<CoreStatus>('/api/core/restart', { method: 'POST' }),
-  download: () => req<CoreStatus>('/api/core/download', { method: 'POST' }),
+  restart: () => req<CoreStatus>('/api/core/restart', { method: 'POST' }, 90000),
+  download: () => req<CoreStatus>('/api/core/download', { method: 'POST' }, 180000),
   elevate: () => req('/api/core/elevate', { method: 'POST' }),
   logs: () => req<{ text: string }>('/api/logs'),
   sysproxy: (enable: boolean) => req<{ enable: boolean; tunEnabled?: boolean; windowsProxy?: boolean; mixedPort?: number }>('/api/sysproxy', { method: 'POST', body: JSON.stringify({ enable }) }),
@@ -167,10 +242,10 @@ export const api = {
     if (url) q.set('url', url)
     if (timeout) q.set('timeout', String(timeout))
     const s = q.toString()
-    return req<Record<string, number>>('/api/proxies/test' + (s ? '?' + s : ''), { method: 'POST' })
+    return req<Record<string, number>>('/api/proxies/test' + (s ? '?' + s : ''), { method: 'POST' }, 120000)
   },
   rulesStatus: () => req<RuleListStatus>('/api/rules/status'),
-  rulesUpdate: () => req<RuleListStatus>('/api/rules/update', { method: 'POST' }),
+  rulesUpdate: () => req<RuleListStatus>('/api/rules/update', { method: 'POST' }, 180000),
   leakCheck: () => req<LeakCheckResult>('/api/leak-check'),
   ghostPanic: () => req<GhostPanicResult>('/api/ghost/panic', { method: 'POST' }),
   ghostRush: () => req<RushResult>('/api/ghost/rush', { method: 'POST' }),
@@ -231,7 +306,7 @@ export const clash = {
   proxies: () => req<{ proxies: Record<string, ClashProxy> }>('/clash/proxies'),
   rules: () => req<{ rules: ClashRule[] }>('/clash/rules'),
   connections: () => req<{ connections: ClashConn[]; downloadTotal: number; uploadTotal: number }>('/clash/connections'),
-  closeAll: () => fetch('/clash/connections', { method: 'DELETE' }),
+  closeAll: () => req<void>('/clash/connections', { method: 'DELETE' }),
   select: async (group: string, name: string) => {
     const res = await fetch('/clash/proxies/' + encodeURIComponent(group), {
       method: 'PUT',
@@ -266,7 +341,7 @@ export const clash = {
     return (await res.json()) as Record<string, number>
   },
   patchMode: (mode: string) =>
-    fetch('/clash/configs', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode }) }),
+    req<void>('/clash/configs', { method: 'PATCH', body: JSON.stringify({ mode }) }),
 }
 
 export type ClashProxy = {
@@ -303,8 +378,6 @@ export function sanitizeBps(n: unknown, prev = 0): number {
   const v = typeof n === 'number' ? n : Number(n)
   if (!Number.isFinite(v) || v < 0) return 0
   if (v > MAX_BPS) return prev > 0 && prev <= MAX_BPS ? prev : 0
-  // Reject one-frame explosions vs recent value (keeps layout stable).
-  if (prev > 8 * 1024 && v > prev * 24) return prev
   return v
 }
 
@@ -329,6 +402,11 @@ export function delayTone(ms?: number) {
   return 'slow'
 }
 
-export function hostMsg(msg: 'drag' | 'minimize' | 'maximize' | 'close') {
+export function hostMsg(msg: 'drag' | 'minimize' | 'maximize' | 'close' | 'material-ready') {
+  const ipc = (window as unknown as { ipc?: { postMessage?: (value: string) => void } }).ipc
+  if (ipc?.postMessage) {
+    ipc.postMessage(msg)
+    return
+  }
   window.chrome?.webview?.postMessage(msg)
 }

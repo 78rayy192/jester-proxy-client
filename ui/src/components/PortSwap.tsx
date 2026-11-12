@@ -1,3 +1,4 @@
+import { useShallow } from 'zustand/react/shallow'
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
 import { useApp } from '../store/app'
@@ -15,7 +16,7 @@ function randomPorts() {
 }
 
 export function PortSwap() {
-  const { settings, status, busy, refresh } = useApp()
+  const { settings, status, busy, refresh } = useApp(useShallow(({ settings, status, busy, refresh }) => ({ settings, status, busy, refresh })))
   const [mixed, setMixed] = useState(settings?.mixedPort || 7890)
   const [socks, setSocks] = useState(settings?.socksPort || 7891)
   const [ext, setExt] = useState(settings?.externalPort || 9090)

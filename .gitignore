@@ -12,3 +12,7 @@ host/obj/
 cores/
 release/
 *.zip
+rust/jester-host/target/
+
+.tools/
+.test-artifacts/

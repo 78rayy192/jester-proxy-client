@@ -22,7 +22,7 @@ public sealed class JesterApi : IDisposable
     readonly SettingsStore _settings;
     readonly ProfileStore _profiles;
     readonly CoreManager _core;
-    readonly HttpClient _clash = new() { Timeout = Timeout.InfiniteTimeSpan };
+    readonly HttpClient _clash = new(new SocketsHttpHandler { UseProxy = false }) { Timeout = Timeout.InfiniteTimeSpan };
     CancellationTokenSource? _cts;
     Task? _loop;
 
@@ -58,7 +58,23 @@ public sealed class JesterApi : IDisposable
         var path = req.Url?.AbsolutePath ?? "/";
         try
         {
+            if (!LocalApiPolicy.IsAllowed(req.Headers["Origin"], req.Headers["Sec-Fetch-Site"],
+                    req.Headers["Host"], LocalApiPolicy.Development))
+            {
+                await WriteJson(ctx, 403, new { error = "Доступ разрешён только интерфейсу Jester." });
+                return;
+            }
             AddCors(ctx);
+            ctx.Response.Headers["X-Content-Type-Options"] = "nosniff";
+            ctx.Response.Headers["Referrer-Policy"] = "no-referrer";
+            if (path.StartsWith("/api/", StringComparison.OrdinalIgnoreCase))
+                ctx.Response.Headers["Cache-Control"] = "no-store";
+            if (req.HasEntityBody && req.HttpMethod is not ("GET" or "HEAD" or "OPTIONS")
+                && !(req.ContentType ?? "").StartsWith("application/json", StringComparison.OrdinalIgnoreCase))
+            {
+                await WriteJson(ctx, 415, new { error = "Ожидается application/json." });
+                return;
+            }
             if (req.HttpMethod == "OPTIONS")
             {
                 ctx.Response.StatusCode = 204;
@@ -79,6 +95,10 @@ public sealed class JesterApi : IDisposable
             }
 
             await ServeUi(ctx, path);
+        }
+        catch (Exception ex) when (ex is ArgumentException or JsonException)
+        {
+            try { await WriteJson(ctx, 400, new { error = ex.Message }); } catch { ctx.Response.Abort(); }
         }
         catch (Exception ex)
         {
@@ -102,14 +122,18 @@ public sealed class JesterApi : IDisposable
                 return;
             case "PUT /api/settings":
                 var next = await ReadJson<AppSettings>(ctx) ?? throw new InvalidOperationException("Пустые настройки.");
-                await WriteJson(ctx, 200, _settings.Save(next));
+                var savedSettings = _settings.Save(next);
+                WindowActions.ApplyAppearance?.Invoke();
+                await WriteJson(ctx, 200, savedSettings);
                 return;
             case "GET /api/appearance":
                 await WriteJson(ctx, 200, _settings.Current.Appearance);
                 return;
             case "PUT /api/appearance":
                 var appearance = await ReadJson<AppearanceSettings>(ctx) ?? new();
-                await WriteJson(ctx, 200, _settings.Patch(s => s.Appearance = appearance).Appearance);
+                var savedAppearance = _settings.Patch(s => s.Appearance = appearance).Appearance;
+                WindowActions.ApplyAppearance?.Invoke();
+                await WriteJson(ctx, 200, savedAppearance);
                 return;
             case "GET /api/appearance/wallpaper":
                 await ServeWallpaper(ctx);
@@ -127,6 +151,7 @@ public sealed class JesterApi : IDisposable
                     s.Appearance.BackgroundImage = picked;
                     s.Appearance.BackgroundStyle = "image";
                 }).Appearance;
+                WindowActions.ApplyAppearance?.Invoke();
                 await WriteJson(ctx, 200, nextAppearance);
                 return;
             }
@@ -139,6 +164,73 @@ public sealed class JesterApi : IDisposable
                 if (string.IsNullOrWhiteSpace(_settings.Current.ActiveProfileId))
                     _settings.Patch(s => s.ActiveProfileId = created.Id);
                 await WriteJson(ctx, 200, created);
+                return;
+            case "POST /api/profiles/update-all":
+            {
+                var (updated, failed, errors) = await _profiles.UpdateAllSubscriptionsAsync();
+                _settings.Patch(s => s.LastSubscriptionUpdateAt = DateTimeOffset.UtcNow);
+                if (_core.Running && updated > 0)
+                {
+                    await _core.RestartIfRunningAsync();
+                }
+                await WriteJson(ctx, 200, new { updated, failed, errors });
+                return;
+            }
+            case "GET /api/app/update":
+                await WriteJson(ctx, 200, await AppUpdateChecker.CheckAsync());
+                return;
+            case "GET /api/settings/export":
+                await WriteJson(ctx, 200, _settings.Current);
+                return;
+            case "POST /api/settings/import":
+            {
+                var imported = await ReadJson<AppSettings>(ctx) ?? throw new InvalidOperationException("Пустой файл настроек.");
+                var savedImport = _settings.Save(imported);
+                WindowActions.ApplyAppearance?.Invoke();
+                await WriteJson(ctx, 200, savedImport);
+                return;
+            }
+            case "POST /api/presets/speed":
+                await WriteJson(ctx, 200, ApplyPreset("speed"));
+                return;
+            case "POST /api/presets/stability":
+                await WriteJson(ctx, 200, ApplyPreset("stability"));
+                return;
+            case "POST /api/presets/protection":
+                await WriteJson(ctx, 200, ApplyPreset("protection"));
+                return;
+            case "POST /api/persona/home":
+            case "POST /api/persona/mobile":
+            case "POST /api/persona/corporate":
+            case "POST /api/persona/auto":
+            {
+                var persona = path.Split('/').Last();
+                await WriteJson(ctx, 200, ApplyPersona(persona));
+                return;
+            }
+            case "GET /api/guardian":
+                await WriteJson(ctx, 200, new
+                {
+                    message = _settings.Current.GuardianMessage,
+                    lane = _settings.Current.AdaptiveLaneState,
+                    rttMs = _settings.Current.LastMeasuredRttMs,
+                    deadManArmed = _settings.Current.DeadManArmed,
+                    exitIp = _settings.Current.LastKnownExitIp,
+                    exitOrg = _settings.Current.LastKnownExitOrg,
+                    smartDirect = _settings.Current.SmartDirectDomains,
+                    dnsPoolIndex = _settings.Current.DnsPoolIndex
+                });
+                return;
+            case "POST /api/guardian/disarm":
+                _core.Guardian?.DisarmFailClosed();
+                await WriteJson(ctx, 200, new { ok = true, deadManArmed = _settings.Current.DeadManArmed });
+                return;
+            case "POST /api/guardian/warm":
+                if (_core.Guardian != null) await _core.Guardian.WarmStartAsync();
+                await WriteJson(ctx, 200, new { ok = true });
+                return;
+            case "POST /api/guardian/learn-direct":
+                await WriteJson(ctx, 200, await LearnSmartDirectNow());
                 return;
             case "GET /api/logs":
                 var lines = int.TryParse(ctx.Request.QueryString["lines"], out var n) ? n : 250;
@@ -177,7 +269,7 @@ public sealed class JesterApi : IDisposable
                     });
                     if (needRestart)
                         await _core.RestartAsync();
-                    else
+                    else if (_core.Running)
                         SystemProxy.Set(true, _settings.Current.MixedPort);
                 }
                 else
@@ -280,7 +372,7 @@ public sealed class JesterApi : IDisposable
                 return;
             }
             _settings.Patch(s => s.ActiveProfileId = id);
-            if (_core.Running) await _core.RestartAsync();
+            await _core.RestartIfRunningAsync();
             await WriteJson(ctx, 200, _settings.Current);
             return;
         }
@@ -294,7 +386,7 @@ public sealed class JesterApi : IDisposable
             }
             var updated = await _profiles.UpdateSubscriptionAsync(id);
             if (_core.Running && _settings.Current.ActiveProfileId == id)
-                await _core.RestartAsync();
+                await _core.RestartIfRunningAsync();
             await WriteJson(ctx, 200, updated);
             return;
         }
@@ -307,6 +399,7 @@ public sealed class JesterApi : IDisposable
                 return;
             }
             var active = _settings.Current.ActiveProfileId == id;
+            if (active) _core.Stop();
             _profiles.Delete(id);
             if (active) _settings.Patch(s => s.ActiveProfileId = "");
             await WriteJson(ctx, 200, new { ok = true });
@@ -320,9 +413,41 @@ public sealed class JesterApi : IDisposable
                 await WriteJson(ctx, 400, new { error = "bad id" });
                 return;
             }
-            var patch = await ReadJson<Dictionary<string, string>>(ctx) ?? new();
-            var name = patch.GetValueOrDefault("name") ?? "";
-            await WriteJson(ctx, 200, _profiles.Rename(id, name));
+            var patch = await ReadJson<Dictionary<string, JsonElement>>(ctx) ?? new();
+            await WriteJson(ctx, 200, _profiles.Patch(id, info =>
+            {
+                if (patch.TryGetValue("name", out var n) && n.ValueKind == JsonValueKind.String)
+                {
+                    var name = n.GetString() ?? "";
+                    if (!string.IsNullOrWhiteSpace(name)) info.Name = name.Trim();
+                }
+                if (patch.TryGetValue("fingerprintOverride", out var fp))
+                {
+                    info.FingerprintOverride = fp.ValueKind == JsonValueKind.String ? fp.GetString() : null;
+                    if (string.IsNullOrWhiteSpace(info.FingerprintOverride)) info.FingerprintOverride = null;
+                }
+                if (patch.TryGetValue("nameserverOverride", out var ns))
+                {
+                    if (ns.ValueKind == JsonValueKind.String)
+                    {
+                        var text = ns.GetString() ?? "";
+                        info.NameserverOverride = text
+                            .Split(['\r', '\n', ',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                            .ToList();
+                        if (info.NameserverOverride.Count == 0) info.NameserverOverride = null;
+                    }
+                    else if (ns.ValueKind == JsonValueKind.Array)
+                    {
+                        info.NameserverOverride = ns.EnumerateArray()
+                            .Select(x => x.GetString() ?? "")
+                            .Where(x => !string.IsNullOrWhiteSpace(x))
+                            .ToList();
+                        if (info.NameserverOverride.Count == 0) info.NameserverOverride = null;
+                    }
+                    else if (ns.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+                        info.NameserverOverride = null;
+                }
+            }));
             return;
         }
 
@@ -351,14 +476,16 @@ public sealed class JesterApi : IDisposable
             upstream.Content = content;
         }
 
-        using var res = await _clash.SendAsync(upstream, HttpCompletionOption.ResponseHeadersRead);
+        using var requestCts = CancellationTokenSource.CreateLinkedTokenSource(_cts?.Token ?? CancellationToken.None);
+        requestCts.CancelAfter(TimeSpan.FromSeconds(30));
+        using var res = await _clash.SendAsync(upstream, HttpCompletionOption.ResponseHeadersRead, requestCts.Token);
         ctx.Response.StatusCode = (int)res.StatusCode;
 
         var contentType = res.Content.Headers.ContentType?.ToString() ?? "";
-        var isStream = contentType.Contains("text/event-stream", StringComparison.OrdinalIgnoreCase)
+        var isStream = res.IsSuccessStatusCode && (contentType.Contains("text/event-stream", StringComparison.OrdinalIgnoreCase)
             || pathOnly.Equals("/traffic", StringComparison.OrdinalIgnoreCase)
             || pathOnly.Equals("/memory", StringComparison.OrdinalIgnoreCase)
-            || pathOnly.StartsWith("/logs", StringComparison.OrdinalIgnoreCase);
+            || pathOnly.Equals("/logs", StringComparison.OrdinalIgnoreCase));
 
         foreach (var h in res.Headers)
             TrySetHeader(ctx.Response.Headers, h.Key, string.Join(",", h.Value));
@@ -371,24 +498,17 @@ public sealed class JesterApi : IDisposable
         await using var src = await res.Content.ReadAsStreamAsync();
         if (isStream)
         {
+            requestCts.CancelAfter(Timeout.InfiniteTimeSpan);
             ctx.Response.SendChunked = true;
-            if (string.IsNullOrWhiteSpace(ctx.Response.ContentType))
-                ctx.Response.ContentType = "text/event-stream";
+            ctx.Response.ContentType = "text/event-stream; charset=utf-8";
             TrySetHeader(ctx.Response.Headers, "Cache-Control", "no-cache");
             TrySetHeader(ctx.Response.Headers, "X-Accel-Buffering", "no");
-            var buffer = new byte[4096];
-            while (true)
-            {
-                var read = await src.ReadAsync(buffer);
-                if (read <= 0) break;
-                await ctx.Response.OutputStream.WriteAsync(buffer.AsMemory(0, read));
-                await ctx.Response.OutputStream.FlushAsync();
-            }
+            await MihomoStream.WriteSseAsync(src, ctx.Response.OutputStream, requestCts.Token);
             ctx.Response.Close();
             return;
         }
 
-        await src.CopyToAsync(ctx.Response.OutputStream);
+        await src.CopyToAsync(ctx.Response.OutputStream, requestCts.Token);
         ctx.Response.Close();
     }
 
@@ -454,8 +574,13 @@ public sealed class JesterApi : IDisposable
 
     static void AddCors(HttpListenerContext ctx)
     {
-        ctx.Response.Headers["Access-Control-Allow-Origin"] = "*";
-        ctx.Response.Headers["Access-Control-Allow-Headers"] = "*";
+        var origin = ctx.Request.Headers["Origin"];
+        if (origin != null && LocalApiPolicy.IsTrustedOrigin(origin, LocalApiPolicy.Development))
+        {
+            ctx.Response.Headers["Access-Control-Allow-Origin"] = origin;
+            ctx.Response.Headers["Vary"] = "Origin";
+        }
+        ctx.Response.Headers["Access-Control-Allow-Headers"] = "Content-Type";
         ctx.Response.Headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,PATCH,DELETE,OPTIONS";
     }
 
@@ -483,8 +608,18 @@ public sealed class JesterApi : IDisposable
 
     static async Task<T?> ReadJson<T>(HttpListenerContext ctx)
     {
+        const int maximum = 8 * 1024 * 1024;
+        if (ctx.Request.ContentLength64 > maximum) throw new ArgumentException("Запрос превышает 8 МиБ.");
         using var reader = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding);
-        var text = await reader.ReadToEndAsync();
+        var builder = new StringBuilder();
+        var buffer = new char[8192];
+        int count;
+        while ((count = await reader.ReadAsync(buffer)) > 0)
+        {
+            if (builder.Length + count > maximum) throw new ArgumentException("Запрос превышает 8 МиБ.");
+            builder.Append(buffer, 0, count);
+        }
+        var text = builder.ToString();
         if (string.IsNullOrWhiteSpace(text)) return default;
         return JsonSerializer.Deserialize<T>(text, Json);
     }
@@ -497,6 +632,156 @@ public sealed class JesterApi : IDisposable
         ctx.Response.ContentLength64 = bytes.Length;
         await ctx.Response.OutputStream.WriteAsync(bytes);
         ctx.Response.Close();
+    }
+
+    AppSettings ApplyPersona(string name)
+    {
+        return _settings.Patch(s =>
+        {
+            s.NetworkPersona = name;
+            s.PerformancePreset = "custom";
+            NetworkPersonas.ApplyPersona(s);
+        });
+    }
+
+    async Task<object> LearnSmartDirectNow()
+    {
+        // Force one smart-direct pass via connections snapshot (reuse learn logic lightly)
+        if (!_core.Running) return new { ok = false, message = "Ядро не запущено." };
+        var before = _settings.Current.SmartDirectDomains.Count;
+        // Trigger by lowering interval barrier: call guardian tick path indirectly
+        _settings.Patch(s => s.SmartDirectMinHits = Math.Max(2, s.SmartDirectMinHits));
+        if (_core.Guardian != null)
+        {
+            // Warm path isn't enough — use existing LearnBypass opposite: promote RU DIRECT hits
+            await Task.Delay(10);
+        }
+        // Manual promotion from current DIRECT RU hosts
+        var result = await PromoteDirectAsync();
+        return result;
+    }
+
+    async Task<object> PromoteDirectAsync()
+    {
+        try
+        {
+            var s = _settings.Current;
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+            http.DefaultRequestHeaders.TryAddWithoutValidation("Authorization", "Bearer " + _core.ApiSecret);
+            using var res = await http.GetAsync($"http://127.0.0.1:{s.ExternalPort}/connections");
+            res.EnsureSuccessStatusCode();
+            using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync());
+            var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (doc.RootElement.TryGetProperty("connections", out var conns))
+            {
+                foreach (var c in conns.EnumerateArray())
+                {
+                    var host = "";
+                    if (c.TryGetProperty("metadata", out var meta) && meta.TryGetProperty("host", out var h))
+                        host = h.GetString() ?? "";
+                    var proxy = c.TryGetProperty("chains", out var chains) && chains.GetArrayLength() > 0
+                        ? chains[0].GetString() ?? "" : "";
+                    if (!proxy.Equals("DIRECT", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (string.IsNullOrWhiteSpace(host)) continue;
+                    if (!(host.EndsWith(".ru", StringComparison.OrdinalIgnoreCase)
+                          || host.EndsWith(".su", StringComparison.OrdinalIgnoreCase)))
+                        continue;
+                    var parts = host.Trim().TrimEnd('.').Split('.');
+                    if (parts.Length >= 2) found.Add(parts[^2] + "." + parts[^1]);
+                }
+            }
+            if (found.Count == 0) return new { ok = false, message = "Нет подходящих DIRECT-доменов.", domains = Array.Empty<string>() };
+            var added = new List<string>();
+            _settings.Patch(x =>
+            {
+                foreach (var d in found)
+                {
+                    if (x.SmartDirectDomains.Contains(d, StringComparer.OrdinalIgnoreCase)) continue;
+                    x.SmartDirectDomains.Add(d);
+                    added.Add(d);
+                }
+                if (added.Count > 0)
+                {
+                    var set = (x.CustomDirectRules ?? "")
+                        .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    foreach (var d in added) set.Add(d);
+                    x.CustomDirectRules = string.Join('\n', set.OrderBy(y => y));
+                }
+            });
+            if (added.Count == 0) return new { ok = true, message = "Домены уже в карте.", domains = found.ToList() };
+            try { await RuleListService.EnsureAsync(_settings.Current); } catch { /* ignore */ }
+            if (_core.Running) await _core.RestartAsync();
+            return new { ok = true, message = $"Добавлено в Smart Direct: {added.Count}", domains = added };
+        }
+        catch (Exception ex)
+        {
+            return new { ok = false, message = ex.Message };
+        }
+    }
+
+    AppSettings ApplyPreset(string name)
+    {
+        return _settings.Patch(s =>
+        {
+            s.PerformancePreset = name;
+            switch (name)
+            {
+                case "speed":
+                    s.RfRushMode = true;
+                    s.PreferRushLane = true;
+                    s.TcpConcurrent = true;
+                    s.UnifiedDelay = true;
+                    s.HighPriority = true;
+                    s.StealthMode = false;
+                    s.SilentLogs = false;
+                    s.LogLevel = "warning";
+                    s.StrictRoute = false;
+                    s.AdaptiveLane = true;
+                    s.WarmStart = true;
+                    s.SplitUdpPolicy = true;
+                    s.PerAppFastPath = true;
+                    s.NetworkPersona = "home";
+                    break;
+                case "stability":
+                    s.RfRushMode = false;
+                    s.PreferRushLane = false;
+                    s.TcpConcurrent = true;
+                    s.UnifiedDelay = true;
+                    s.HighPriority = false;
+                    s.StealthMode = true;
+                    s.BlockQuic = true;
+                    s.BlockStun = true;
+                    s.DnsViaProxy = true;
+                    s.SilentLogs = true;
+                    s.StrictRoute = false;
+                    s.AdaptiveLane = false;
+                    s.LatencyBudgetEnabled = true;
+                    s.LatencyBudgetMs = 320;
+                    s.NetworkPersona = "auto";
+                    break;
+                case "protection":
+                    s.RfRushMode = true;
+                    s.PreferRushLane = true;
+                    s.StealthMode = true;
+                    s.BlockQuic = true;
+                    s.BlockStun = true;
+                    s.DnsViaProxy = true;
+                    s.DnsRespectRules = true;
+                    s.RandomFingerprint = true;
+                    s.SilentLogs = true;
+                    s.HideFromCapture = true;
+                    s.StrictRoute = true;
+                    s.UseMrsRules = true;
+                    s.TrafficPadding = true;
+                    s.DnsDiversity = true;
+                    s.DnsStrictNoFallback = true;
+                    s.ExitConsistencyCheck = true;
+                    s.DeadManSwitch = true;
+                    s.NetworkPersona = "corporate";
+                    break;
+            }
+        });
     }
 
     public void Dispose()
@@ -514,5 +799,6 @@ public static class WindowActions
     public static Action<bool>? CloseOrTray { get; set; }
     public static Action? Drag { get; set; }
     public static Action? ApplyCapture { get; set; }
+    public static Action? ApplyAppearance { get; set; }
     public static Func<string?>? PickImage { get; set; }
 }

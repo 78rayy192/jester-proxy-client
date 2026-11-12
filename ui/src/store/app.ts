@@ -20,6 +20,10 @@ type Store = {
   run: (fn: () => Promise<unknown>) => Promise<void>
 }
 
+let refreshing: Promise<void> | null = null
+let saving: Promise<void> | null = null
+const unchanged = <T,>(previous: T, next: T): T => JSON.stringify(previous) === JSON.stringify(next) ? previous : next
+
 export const useApp = create<Store>((set, get) => ({
   page: 'dashboard',
   setPage: (page) => set({ page }),
@@ -31,24 +35,32 @@ export const useApp = create<Store>((set, get) => ({
   settingsEpoch: 0,
   patching: false,
   live: { up: 0, down: 0, mem: 0, now: '' },
-  setLive: (partial) => set({ live: { ...get().live, ...partial } }),
-  refresh: async () => {
+  setLive: (partial) => {
+    const live = get().live
+    if (Object.entries(partial).some(([key, value]) => live[key as keyof typeof live] !== value))
+      set({ live: { ...live, ...partial } })
+  },
+  refresh: () => {
+    if (refreshing) return refreshing
     const epoch = get().settingsEpoch
-    try {
+    refreshing = (async () => { try {
       const [status, settings, profiles] = await Promise.all([api.status(), api.settings(), api.profiles()])
+      const current = get()
+      const common = { status: unchanged(current.status, status), profiles: unchanged(current.profiles, profiles) }
       // Don't clobber a newer local patch with a stale GET.
       if (get().patching || get().settingsEpoch !== epoch) {
-        set({ status, profiles })
+        set(common)
         return
       }
-      set({ status, settings, profiles, error: '' })
+      set({ ...common, settings: unchanged(current.settings, settings), error: '' })
     } catch (e) {
       set({ error: e instanceof Error ? e.message : 'Ошибка связи с хостом' })
-    }
+    } finally { refreshing = null } })()
+    return refreshing
   },
-  patchSettings: async (partial) => {
+  patchSettings: (partial) => {
     const cur = get().settings
-    if (!cur) return
+    if (!cur) return Promise.resolve()
     const epoch = get().settingsEpoch + 1
     const next = {
       ...cur,
@@ -56,20 +68,43 @@ export const useApp = create<Store>((set, get) => ({
       dns: { ...cur.dns, ...(partial.dns || {}) },
       appearance: { ...cur.appearance, ...(partial.appearance || {}) },
     }
-    set({ settings: next, settingsEpoch: epoch, patching: true })
-    try {
-      const saved = await api.saveSettings(next)
-      if (get().settingsEpoch === epoch) set({ settings: saved })
-    } catch (e) {
-      set({ error: e instanceof Error ? e.message : 'Ошибка сохранения' })
-      await get().refresh()
-    } finally {
-      if (get().settingsEpoch === epoch) set({ patching: false })
-    }
+    set({ settings: next, settingsEpoch: epoch, patching: true, error: '' })
+    if (saving) return saving
+    // Batch edits from the same event turn, then serialize writes. A slow older
+    // PUT must never arrive after a newer one and restore stale settings.
+    let confirmed = cur
+    saving = Promise.resolve().then(async () => {
+      try {
+        while (true) {
+          const snapshot = get()
+          const saved = await api.saveSettings(snapshot.settings!)
+          confirmed = saved
+          if (get().settingsEpoch === snapshot.settingsEpoch) {
+            set({ settings: saved, error: '' })
+            break
+          }
+        }
+      } catch (e) {
+        set({ settings: confirmed, error: e instanceof Error ? e.message : 'Ошибка сохранения' })
+        throw e
+      } finally {
+        set({ patching: false })
+        saving = null
+      }
+    })
+    // Field changes may intentionally ignore the promise; command handlers that
+    // await it still receive failures and must not restart with unsaved values.
+    void saving.catch(() => undefined)
+    return saving
   },
   run: async (fn) => {
+    if (get().busy) return
     set({ busy: true, error: '' })
     try {
+      if (saving) {
+        await saving
+        if (get().error) return
+      }
       await fn()
       await get().refresh()
     } catch (e) {

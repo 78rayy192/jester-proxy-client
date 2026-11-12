@@ -10,6 +10,7 @@ namespace Jester.Host.Services;
 /// </summary>
 public static class SystemProxy
 {
+    static readonly object Gate = new();
     const int InternetOptionPerConnectionOption = 75;
     const int InternetOptionSettingsChanged = 39;
     const int InternetOptionRefresh = 37;
@@ -23,6 +24,12 @@ public static class SystemProxy
     const uint ProxyTypeProxy = 0x00000002;
 
     public static void Set(bool enable, int port)
+    {
+        if (enable && port is < 1 or > 65535) throw new ArgumentOutOfRangeException(nameof(port));
+        lock (Gate) Apply(enable, port);
+    }
+
+    static void Apply(bool enable, int port)
     {
         var server = $"127.0.0.1:{Math.Max(1, port)}";
         var bypass = "localhost;127.*;10.*;192.168.*;172.16.*;172.17.*;172.18.*;172.19.*;<local>";
@@ -143,14 +150,16 @@ public static class SystemProxy
                 : "winhttp reset proxy";
             using var p = Process.Start(new ProcessStartInfo
             {
-                FileName = "netsh",
+                FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "netsh.exe"),
                 Arguments = args,
                 UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
+                CreateNoWindow = true
             });
-            p?.WaitForExit(4000);
+            if (p != null && !p.WaitForExit(1500))
+            {
+                // A timed-out helper must not change proxy settings after a newer request.
+                try { p.Kill(true); p.WaitForExit(500); } catch { /* optional */ }
+            }
         }
         catch { /* optional */ }
     }

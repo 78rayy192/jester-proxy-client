@@ -90,6 +90,72 @@ public sealed class AppSettings
         "https://github.com/legiz-ru/mihomo-rule-sets/raw/main/re-filter/domain-rule.mrs";
     public string RefilterIpMrsUrl { get; set; } =
         "https://github.com/legiz-ru/mihomo-rule-sets/raw/main/re-filter/ip-rule.mrs";
+
+    public bool AutoUpdateSubscriptions { get; set; } = true;
+    public int AutoUpdateIntervalHours { get; set; } = 6;
+    public DateTimeOffset? LastSubscriptionUpdateAt { get; set; }
+    public List<string> FavoriteNodes { get; set; } = [];
+    public string LastSelectedNode { get; set; } = "";
+    public bool FirstRunCompleted { get; set; }
+    public bool ConnectionHighlight { get; set; } = true;
+    public bool AutoRestartCore { get; set; } = true;
+    /// <summary>speed | stability | protection | custom</summary>
+    public string PerformancePreset { get; set; } = "custom";
+
+    /// <summary>auto | home | mobile | corporate</summary>
+    public string NetworkPersona { get; set; } = "auto";
+
+    /// <summary>Switch RUSH↔AUTO by live RTT.</summary>
+    public bool AdaptiveLane { get; set; } = true;
+    public int AdaptiveLaneBadRttMs { get; set; } = 280;
+    public int AdaptiveLaneGoodRttMs { get; set; } = 140;
+    public int AdaptiveLaneIntervalSec { get; set; } = 45;
+
+    /// <summary>Selected processes always take PROXY/RUSH.</summary>
+    public bool PerAppFastPath { get; set; } = true;
+    public string FastPathProcesses { get; set; } =
+        "chrome.exe\nmsedge.exe\nfirefox.exe\nbrave.exe\ndiscord.exe\nTelegram.exe\nCursor.exe\nCode.exe";
+
+    public bool WarmStart { get; set; } = true;
+
+    /// <summary>Game/VoIP UDP ports → UDP-FAST group; other UDP via PROXY.</summary>
+    public bool SplitUdpPolicy { get; set; } = true;
+    public string UdpFastPorts { get; set; } = "3074,5000-5020,27015-27050,27000-27100,3659,7000-7500";
+
+    /// <summary>Jitter keep-alive / MTU to reduce identical client fingerprint.</summary>
+    public bool TrafficPadding { get; set; } = true;
+
+    public bool DnsDiversity { get; set; } = true;
+    public bool DnsStrictNoFallback { get; set; }
+    public int DnsRotateHours { get; set; } = 12;
+    public int DnsPoolIndex { get; set; }
+    public DateTimeOffset? LastDnsRotateAt { get; set; }
+
+    public bool ExitConsistencyCheck { get; set; } = true;
+    public int ExitCheckIntervalSec { get; set; } = 120;
+    /// <summary>switch | panic | warn</summary>
+    public string ExitCheckAction { get; set; } = "switch";
+    public string? LastKnownExitIp { get; set; }
+    public string? LastKnownExitOrg { get; set; }
+
+    /// <summary>If core dies, fail-closed until restart succeeds or user disarms.</summary>
+    public bool DeadManSwitch { get; set; } = true;
+    public bool DeadManArmed { get; set; }
+
+    public bool SmartDirectMap { get; set; } = true;
+    public int SmartDirectMinHits { get; set; } = 5;
+    public Dictionary<string, int> SmartDirectHits { get; set; } = new();
+    public List<string> SmartDirectDomains { get; set; } = [];
+
+    public bool LatencyBudgetEnabled { get; set; } = true;
+    public int LatencyBudgetMs { get; set; } = 250;
+    /// <summary>switch | warn</summary>
+    public string LatencyBudgetAction { get; set; } = "switch";
+
+    /// <summary>Runtime telemetry for UI (not critical if lost).</summary>
+    public string AdaptiveLaneState { get; set; } = "idle";
+    public int LastMeasuredRttMs { get; set; }
+    public string GuardianMessage { get; set; } = "";
 }
 
 public sealed class DnsSettings
@@ -119,17 +185,18 @@ public sealed class DnsSettings
 
 public sealed class AppearanceSettings
 {
-    public string Theme { get; set; } = "dark";
-    public string Accent { get; set; } = "#e6c48a";
-    public string AccentMuted { get; set; } = "#a89068";
-    public string Background { get; set; } = "#090a0e";
-    public string Surface { get; set; } = "#12131a";
-    public string Text { get; set; } = "#f7f3ec";
+    public string Theme { get; set; } = "liquid";
+    public string Accent { get; set; } = "#b8d4ff";
+    public string AccentMuted { get; set; } = "#7d9cce";
+    public string Background { get; set; } = "#0b101b";
+    public string Surface { get; set; } = "#182235";
+    public string Text { get; set; } = "#f2f6ff";
     public string BackgroundStyle { get; set; } = "mesh";
     public string? BackgroundImage { get; set; }
-    public bool Glass { get; set; }
-    public int GlassBlur { get; set; }
-    public int Radius { get; set; } = 16;
+    public bool Glass { get; set; } = true;
+    public int GlassBlur { get; set; } = 6;
+    public double GlassTintOpacity { get; set; } = 0.1;
+    public int Radius { get; set; } = 22;
     public double WindowOpacity { get; set; } = 1;
     public string FontUi { get; set; } = "Segoe UI";
     public string FontDisplay { get; set; } = "Segoe UI";
@@ -147,6 +214,16 @@ public sealed class ProfileInfo
     public string Source { get; set; } = "";
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
     public long Bytes { get; set; }
+    public long Upload { get; set; }
+    public long Download { get; set; }
+    public long Total { get; set; }
+    public long ExpireUnix { get; set; }
+    public bool HwidLimited { get; set; }
+    public int UpdateIntervalHours { get; set; }
+    /// <summary>Session isolation: override TLS fingerprint for this profile.</summary>
+    public string? FingerprintOverride { get; set; }
+    /// <summary>Session isolation: override DoH nameservers (one per line / list).</summary>
+    public List<string>? NameserverOverride { get; set; }
 }
 
 public sealed record CoreStatus
@@ -158,6 +235,7 @@ public sealed record CoreStatus
     public bool NeedsAdmin { get; set; }
     public int Pid { get; set; }
     public string Version { get; set; } = "";
+    public string AppVersion { get; set; } = "";
     public string Message { get; set; } = "";
     public int DownloadProgress { get; set; }
     public string ActiveProfileId { get; set; } = "";

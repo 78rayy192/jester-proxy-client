@@ -7,8 +7,8 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      '/api': 'http://127.0.0.1:37841',
-      '/clash': 'http://127.0.0.1:37841',
+      '/api': { target: 'http://127.0.0.1:37841', changeOrigin: true },
+      '/clash': { target: 'http://127.0.0.1:37841', changeOrigin: true },
     },
   },
   build: {
