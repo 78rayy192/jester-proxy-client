@@ -222,7 +222,9 @@ public static class SubscriptionNormalizer
                     if (list.Count > 0) proxy["alpn"] = list;
                 }
             }
-            if (LooksLikeIp(proxy["server"].ToString())) proxy["skip-cert-verify"] = true;
+            if (stream.ValueKind == JsonValueKind.Object && stream.TryGetProperty("tlsSettings", out var tlsOptions)
+                && tlsOptions.TryGetProperty("allowInsecure", out var insecure) && insecure.ValueKind == JsonValueKind.True)
+                proxy["skip-cert-verify"] = true;
             return proxy;
         }
 
@@ -248,6 +250,8 @@ public static class SubscriptionNormalizer
                 if (sni.Length > 0) proxy["servername"] = sni;
                 var fp = JsonStr(tls, "fingerprint");
                 if (fp.Length > 0) proxy["client-fingerprint"] = fp;
+                if (tls.TryGetProperty("allowInsecure", out var insecure) && insecure.ValueKind == JsonValueKind.True)
+                    proxy["skip-cert-verify"] = true;
                 if (security == "reality")
                 {
                     var reality = new Dictionary<string, object>();
@@ -288,7 +292,6 @@ public static class SubscriptionNormalizer
             proxy["ws-opts"] = opts;
         }
 
-        if (LooksLikeIp(proxy["server"].ToString())) proxy["skip-cert-verify"] = true;
     }
 
     static string JsonStr(JsonElement el, string key)
@@ -346,24 +349,51 @@ public static class SubscriptionNormalizer
         {
             foreach (var key in dict.Keys.ToList())
             {
-                if (dict[key] is string s && map.TryGetValue(s, out var next) && !string.Equals(key as string, "name", StringComparison.Ordinal))
+                var field = key as string;
+                if (field is "dialer-proxy" or "proxy" && dict[key] is string s && map.TryGetValue(s, out var next))
                     dict[key] = next;
+                else if (field == "proxies" && dict[key] is IList members)
+                {
+                    for (var i = 0; i < members.Count; i++)
+                    {
+                        if (members[i] is string member && map.TryGetValue(member, out var renamed)) members[i] = renamed;
+                        else if (members[i] != null) Rewrite(members[i]!, map);
+                    }
+                }
+                else if (field == "rules" && dict[key] is IList rules)
+                    RewriteRules(rules, map);
+                else if (field == "sub-rules" && dict[key] is IDictionary<object, object> subRules)
+                {
+                    foreach (var value in subRules.Values)
+                        if (value is IList subList) RewriteRules(subList, map);
+                }
                 else Rewrite(dict[key]!, map);
             }
         }
         else if (node is IList list)
         {
-            for (var i = 0; i < list.Count; i++)
-            {
-                if (list[i] is string s && map.TryGetValue(s, out var next)) list[i] = next;
-                else if (list[i] != null) Rewrite(list[i]!, map);
-            }
+            foreach (var item in list)
+                if (item != null) Rewrite(item, map);
+        }
+    }
+
+    static void RewriteRules(IList rules, Dictionary<string, string> map)
+    {
+        for (var i = 0; i < rules.Count; i++)
+        {
+            if (rules[i] is not string rule || rule.StartsWith("SUB-RULE,", StringComparison.OrdinalIgnoreCase)) continue;
+            var suffix = rule.EndsWith(",no-resolve", StringComparison.OrdinalIgnoreCase) ? ",no-resolve" : "";
+            var body = suffix.Length > 0 ? rule[..^suffix.Length] : rule;
+            var separator = body.LastIndexOf(',');
+            if (separator >= 0 && map.TryGetValue(body[(separator + 1)..], out var next))
+                rules[i] = body[..(separator + 1)] + next + suffix;
         }
     }
 
     static bool LooksLikeClash(string text)
     {
         return text.Contains("proxies:", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("proxy-providers:", StringComparison.OrdinalIgnoreCase)
             || text.Contains("proxy-groups:", StringComparison.OrdinalIgnoreCase)
             || text.Contains("mixed-port:", StringComparison.OrdinalIgnoreCase);
     }
@@ -382,15 +412,16 @@ public static class SubscriptionNormalizer
 
     static string? TryBase64(string text)
     {
-        var compact = text.Replace("\r", "").Replace("\n", "").Replace(" ", "");
-        if (compact.Length < 16 || compact.Contains("://")) return null;
+        var compact = text.Trim().Replace("\r", "").Replace("\n", "").Replace(" ", "")
+            .Replace('-', '+').Replace('_', '/');
+        if (compact.Length == 0 || compact.Contains("://")) return null;
         try
         {
             var pad = compact.Length % 4;
             if (pad > 0) compact += new string('=', 4 - pad);
             var bytes = Convert.FromBase64String(compact);
-            var s = Encoding.UTF8.GetString(bytes);
-            return s.Contains("://") || LooksLikeClash(s) ? s : null;
+            // VMess uses base64 JSON and SS uses base64 credentials, not URI text.
+            return new UTF8Encoding(false, true).GetString(bytes);
         }
         catch { return null; }
     }
@@ -399,6 +430,21 @@ public static class SubscriptionNormalizer
     {
         if (raw.StartsWith("vmess://", StringComparison.OrdinalIgnoreCase))
             return ParseVmess(raw);
+        if (raw.StartsWith("ss://", StringComparison.OrdinalIgnoreCase))
+        {
+            var body = raw[5..];
+            var end = body.IndexOfAny(['#', '?']);
+            var authority = end >= 0 ? body[..end] : body;
+            if (!authority.Contains('@'))
+            {
+                // Legacy SS encodes the entire method:password@host:port authority.
+                var decoded = TryBase64(authority.TrimEnd('/'));
+                var separator = decoded?.LastIndexOf('@') ?? -1;
+                if (separator <= 0) return null;
+                raw = "ss://" + Uri.EscapeDataString(decoded![..separator]) + decoded[separator..]
+                    + (end >= 0 ? body[end..] : "");
+            }
+        }
         if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri)) return null;
         var scheme = uri.Scheme.ToLowerInvariant();
         return scheme switch
@@ -427,7 +473,7 @@ public static class SubscriptionNormalizer
         var tls = security is "tls" or "reality" || q.Get("sni") != null;
         if (tls) proxy["tls"] = true;
         if (!string.IsNullOrWhiteSpace(q.Get("sni"))) proxy["servername"] = q.Get("sni")!;
-        if (q.Get("insecure") is "1" or "true" || LooksLikeIp(uri.Host)) proxy["skip-cert-verify"] = true;
+        if (Insecure(q)) proxy["skip-cert-verify"] = true;
         if (security == "reality")
         {
             proxy["tls"] = true;
@@ -466,7 +512,7 @@ public static class SubscriptionNormalizer
         if (q.Get("obfs-password") is { Length: > 0 } op) proxy["obfs-password"] = op;
         if (q.Get("alpn") is { Length: > 0 } alpn)
             proxy["alpn"] = alpn.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Cast<object>().ToList();
-        if (q.Get("insecure") is "1" or "true" || LooksLikeIp(uri.Host) || LooksLikeIp(q.Get("sni")))
+        if (Insecure(q))
             proxy["skip-cert-verify"] = true;
         if (q.Get("fp") is { Length: > 0 } fp) proxy["client-fingerprint"] = fp;
         return proxy;
@@ -485,7 +531,7 @@ public static class SubscriptionNormalizer
         if (q.Get("udp_relay_mode") is { Length: > 0 } relay) proxy["udp-relay-mode"] = relay;
         if (q.Get("alpn") is { Length: > 0 } alpn)
             proxy["alpn"] = alpn.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Cast<object>().ToList();
-        if (q.Get("insecure") is "1" or "true" || LooksLikeIp(uri.Host)) proxy["skip-cert-verify"] = true;
+        if (Insecure(q)) proxy["skip-cert-verify"] = true;
         return proxy;
     }
 
@@ -499,7 +545,8 @@ public static class SubscriptionNormalizer
         if (q.Get("fp") is { Length: > 0 } fp) proxy["client-fingerprint"] = fp;
         var type = q.Get("type") ?? "tcp";
         proxy["network"] = type;
-        if (q.Get("insecure") is "1" or "true" || LooksLikeIp(uri.Host)) proxy["skip-cert-verify"] = true;
+        ApplyShareTransport(proxy, q, type);
+        if (Insecure(q)) proxy["skip-cert-verify"] = true;
         return proxy;
     }
 
@@ -539,6 +586,16 @@ public static class SubscriptionNormalizer
         if (!string.IsNullOrWhiteSpace(net)) proxy["network"] = net;
         if (S("tls") is "tls" or "reality") proxy["tls"] = true;
         if (!string.IsNullOrWhiteSpace(S("sni"))) proxy["servername"] = S("sni");
+        if (net == "ws")
+        {
+            var opts = new Dictionary<string, object>();
+            if (S("path").Length > 0) opts["path"] = S("path");
+            if (S("host").Length > 0) opts["headers"] = new Dictionary<string, object> { ["Host"] = S("host") };
+            proxy["ws-opts"] = opts;
+        }
+        if (net == "grpc" && S("path").Length > 0)
+            proxy["grpc-opts"] = new Dictionary<string, object> { ["grpc-service-name"] = S("path") };
+        if (S("fp").Length > 0) proxy["client-fingerprint"] = S("fp");
         return proxy;
     }
 
@@ -582,8 +639,22 @@ public static class SubscriptionNormalizer
         return n;
     }
 
-    static bool LooksLikeIp(string? host) =>
-        !string.IsNullOrWhiteSpace(host) && (System.Net.IPAddress.TryParse(host, out _) || host.All(c => char.IsDigit(c) || c == '.'));
+    static bool Insecure(Dictionary<string, string> query) =>
+        new[] { query.Get("insecure"), query.Get("allowInsecure") }
+            .Any(value => value == "1" || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase));
+
+    static void ApplyShareTransport(Dictionary<string, object> proxy, Dictionary<string, string> q, string type)
+    {
+        if (type == "ws")
+        {
+            var opts = new Dictionary<string, object>();
+            if (q.Get("path") is { Length: > 0 } path) opts["path"] = path;
+            if (q.Get("host") is { Length: > 0 } host) opts["headers"] = new Dictionary<string, object> { ["Host"] = host };
+            proxy["ws-opts"] = opts;
+        }
+        if (type == "grpc" && q.Get("serviceName") is { Length: > 0 } service)
+            proxy["grpc-opts"] = new Dictionary<string, object> { ["grpc-service-name"] = service };
+    }
 }
 
 file static class QueryGet

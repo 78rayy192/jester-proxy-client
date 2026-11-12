@@ -29,6 +29,7 @@ public static class ConfigBuilder
         }
 
         var stealth = settings.StealthMode;
+        var dnsEnabled = settings.Dns.Enable || stealth;
 
         Set(doc, "mixed-port", settings.MixedPort);
         Set(doc, "socks-port", settings.SocksPort);
@@ -47,12 +48,24 @@ public static class ConfigBuilder
 
         Set(doc, "ipv6", stealth ? false : settings.Ipv6);
         Set(doc, "unified-delay", settings.UnifiedDelay);
-        Set(doc, "tcp-concurrent", true); // always — faster dials
-        Set(doc, "keep-alive-idle", settings.KeepAlive ? 10 : 0);
-        Set(doc, "keep-alive-interval", settings.KeepAlive ? 10 : 0);
-        Set(doc, "find-process-mode", stealth ? "off" : settings.FindProcessMode);
+        Set(doc, "tcp-concurrent", settings.TcpConcurrent);
+        Set(doc, "disable-keep-alive", !settings.KeepAlive);
+        var keepIdle = settings.KeepAlive ? 10 : 0;
+        var keepInterval = settings.KeepAlive ? 10 : 0;
+        if (settings.TrafficPadding && settings.KeepAlive)
+        {
+            var rnd = new Random(Environment.TickCount ^ settings.DnsPoolIndex);
+            keepIdle = rnd.Next(8, 19);
+            keepInterval = rnd.Next(8, 17);
+        }
+        Set(doc, "keep-alive-idle", keepIdle);
+        Set(doc, "keep-alive-interval", keepInterval);
+        var findProcess = settings.FindProcessMode;
+        if (settings.PerAppFastPath) findProcess = "strict";
+        else if (stealth) findProcess = "off";
+        Set(doc, "find-process-mode", findProcess);
 
-        var fp = settings.RandomFingerprint || stealth
+        var fp = settings.RandomFingerprint
             ? "random"
             : (string.IsNullOrWhiteSpace(settings.GlobalClientFingerprint) ? "chrome" : settings.GlobalClientFingerprint);
         Set(doc, "global-client-fingerprint", fp);
@@ -92,17 +105,17 @@ public static class ConfigBuilder
         }
 
         Set(doc, "external-controller", $"127.0.0.1:{settings.ExternalPort}");
+        // A subscription must not expose an additional controller listener.
+        Remove(doc, "external-controller-tls", "external-controller-unix", "external-controller-pipe", "external-doh-server");
         Set(doc, "secret", secret);
+        var origins = new List<object> { "http://127.0.0.1:37841", "http://localhost:37841" };
+        var dev = Environment.GetEnvironmentVariable("JESTER_DEV");
+        if (dev == "1" || string.Equals(dev, "true", StringComparison.OrdinalIgnoreCase))
+            origins.AddRange(["http://127.0.0.1:5173", "http://localhost:5173"]);
         Set(doc, "external-controller-cors", new Dictionary<object, object>
         {
-            ["allow-origins"] = stealth
-                ? new List<object> { "http://127.0.0.1:37841", "http://localhost:37841" }
-                : new List<object>
-                {
-                    "http://127.0.0.1:37841", "http://localhost:37841",
-                    "http://127.0.0.1:5173", "http://localhost:5173", "*"
-                },
-            ["allow-private-network"] = true
+            ["allow-origins"] = origins,
+            ["allow-private-network"] = false
         });
 
         var mtu = settings.Mtu > 0 ? settings.Mtu : 1400;
@@ -117,15 +130,15 @@ public static class ConfigBuilder
             ["auto-redirect"] = settings.AutoRedirect,
             ["strict-route"] = stealth && settings.TunEnabled || settings.StrictRoute,
             ["mtu"] = mtu,
-            ["endpoint-independent-nat"] = true,
-            ["dns-hijack"] = settings.DnsHijack || stealth
+            ["endpoint-independent-nat"] = settings.EndpointIndependentNat,
+            ["dns-hijack"] = dnsEnabled && (settings.DnsHijack || stealth)
                 ? new List<object> { "any:53", "tcp://any:53" }
                 : new List<object>(),
             ["inet4-address"] = new List<object> { settings.Inet4Address },
             ["udp-timeout"] = 30
         });
 
-        if (settings.Dns.Enable)
+        if (dnsEnabled)
         {
             var viaProxy = settings.DnsViaProxy || stealth;
             var nameservers = viaProxy
@@ -134,14 +147,16 @@ public static class ConfigBuilder
             var fallbacks = viaProxy
                 ? settings.Dns.Fallback.Select(WrapDnsViaProxy).Cast<object>().ToList()
                 : settings.Dns.Fallback.Cast<object>().ToList();
+            if (settings.DnsStrictNoFallback)
+                fallbacks = [];
 
             var dns = new Dictionary<object, object>
             {
                 ["enable"] = true,
-                ["ipv6"] = false,
+                ["ipv6"] = !stealth && settings.Ipv6 && settings.Dns.Ipv6,
                 ["prefer-h3"] = false,
                 ["use-hosts"] = settings.Dns.UseHosts,
-                ["enhanced-mode"] = "fake-ip",
+                ["enhanced-mode"] = settings.Dns.EnhancedMode,
                 ["fake-ip-range"] = settings.Dns.FakeIpRange,
                 ["fake-ip-filter"] = CriticalFakeIpFilter(settings),
                 ["default-nameserver"] = settings.Dns.DefaultNameserver.Cast<object>().ToList(),
@@ -149,7 +164,9 @@ public static class ConfigBuilder
                 ["fallback"] = fallbacks,
                 ["cache-algorithm"] = "arc",
                 ["proxy-server-nameserver"] = settings.Dns.DefaultNameserver.Cast<object>().ToList(),
-                ["direct-nameserver"] = settings.Dns.DefaultNameserver.Cast<object>().ToList(),
+                // DIRECT destinations still use the protected resolver when requested.
+                // Bootstrap resolvers are reserved for resolving proxy/DNS server names.
+                ["direct-nameserver"] = viaProxy ? nameservers : settings.Dns.DefaultNameserver.Cast<object>().ToList(),
                 ["fallback-filter"] = new Dictionary<object, object>
                 {
                     ["geoip"] = true,
@@ -162,6 +179,8 @@ public static class ConfigBuilder
                 dns["respect-rules"] = true;
             Set(doc, "dns", dns);
         }
+        else
+            Set(doc, "dns", new Dictionary<object, object> { ["enable"] = false });
 
         EnsureProxyGroup(doc, stealth, settings);
         ApplySmartRouting(doc, settings);
@@ -169,17 +188,22 @@ public static class ConfigBuilder
         return Serializer.Serialize(doc);
     }
 
-    /// <summary>Force DoH/DoT queries through PROXY outbound (mihomo #PROXY suffix).</summary>
+    /// <summary>Force application DNS through PROXY; retain resolver parameters, never a DIRECT/interface override.</summary>
     static string WrapDnsViaProxy(string server)
     {
-        if (string.IsNullOrWhiteSpace(server)) return server;
-        if (server.Contains('#', StringComparison.Ordinal)) return server;
-        // Only wrap encrypted resolvers — plain IP stays for bootstrap paths
-        if (server.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
-            || server.StartsWith("tls://", StringComparison.OrdinalIgnoreCase)
-            || server.StartsWith("quic://", StringComparison.OrdinalIgnoreCase))
-            return server + "#PROXY";
-        return server;
+        var parts = server.Trim().Split('#', 2);
+        var address = parts[0];
+        if (address.Equals("system", StringComparison.OrdinalIgnoreCase)
+            || address.StartsWith("system://", StringComparison.OrdinalIgnoreCase)
+            || address.StartsWith("dhcp://", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Для DNS через прокси укажите адрес DNS-сервера вместо system/DHCP.");
+        if (System.Net.IPAddress.TryParse(address, out var ip)
+            && ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+            address = "[" + address + "]";
+        var options = parts.Length == 2
+            ? parts[1].Split('&', StringSplitOptions.RemoveEmptyEntries).Where(p => p.Contains('='))
+            : [];
+        return address + "#PROXY" + string.Concat(options.Select(p => "&" + p));
     }
 
     static void EnsureProxyGroup(Dictionary<object, object> doc, bool stealth, AppSettings settings)
@@ -196,13 +220,21 @@ public static class ConfigBuilder
         }
 
         var groups = GetList(doc, "proxy-groups");
+        var providerNames = doc.TryGetValue("proxy-providers", out var rawProviders)
+            && rawProviders is Dictionary<object, object> proxyProviders
+            ? proxyProviders.Keys.Select(k => k.ToString() ?? "").Where(k => k.Length > 0).ToList()
+            : [];
+        var hasMembers = names.Count > 0 || providerNames.Count > 0;
         var hasProxy = groups.Any(g => NameOf(g).Equals("PROXY", StringComparison.OrdinalIgnoreCase));
         var hasAuto = groups.Any(g => NameOf(g).Equals("AUTO", StringComparison.OrdinalIgnoreCase));
         var hasRush = groups.Any(g => NameOf(g).Equals("RUSH", StringComparison.OrdinalIgnoreCase));
+        var hasUdpFast = groups.Any(g => NameOf(g).Equals("UDP-FAST", StringComparison.OrdinalIgnoreCase));
         var rush = settings.RfRushMode && fastNames.Count > 0;
+        var udpLane = settings.SplitUdpPolicy && (fastNames.Count > 0 || names.Count > 0);
+        var udpMembers = fastNames.Count > 0 ? fastNames : names;
 
         // Faster + quieter url-test: lazy (no dial until used), longer interval
-        if (!hasAuto && names.Count > 0)
+        if (!hasAuto && hasMembers)
         {
             groups.Add(new Dictionary<object, object>
             {
@@ -213,7 +245,8 @@ public static class ConfigBuilder
                 ["tolerance"] = 80,
                 ["lazy"] = true,
                 ["expected-status"] = "204",
-                ["proxies"] = names.Cast<object>().ToList()
+                ["proxies"] = names.Cast<object>().ToList(),
+                ["use"] = providerNames.Cast<object>().ToList()
             });
         }
         else
@@ -260,13 +293,41 @@ public static class ConfigBuilder
             }
         }
 
+        if (udpLane && !hasUdpFast)
+        {
+            groups.Insert(0, new Dictionary<object, object>
+            {
+                ["name"] = "UDP-FAST",
+                ["type"] = "url-test",
+                ["url"] = "https://www.gstatic.com/generate_204",
+                ["interval"] = 120,
+                ["tolerance"] = 50,
+                ["lazy"] = true,
+                ["expected-status"] = "204",
+                ["proxies"] = udpMembers.Cast<object>().ToList()
+            });
+        }
+        else if (udpLane)
+        {
+            foreach (var g in groups)
+            {
+                if (!NameOf(g).Equals("UDP-FAST", StringComparison.OrdinalIgnoreCase)) continue;
+                if (g is Dictionary<object, object> d)
+                {
+                    d["proxies"] = udpMembers.Cast<object>().ToList();
+                    d["interval"] = 120;
+                    d["tolerance"] = 50;
+                }
+            }
+        }
+
         var proxyChildren = new List<string>();
         if (rush && settings.PreferRushLane) proxyChildren.Add("RUSH");
         proxyChildren.Add("AUTO");
         if (rush && !settings.PreferRushLane) proxyChildren.Add("RUSH");
         proxyChildren.AddRange(names);
 
-        if (!hasProxy && names.Count > 0)
+        if (!hasProxy && hasMembers)
         {
             groups.Insert(0, new Dictionary<object, object>
             {
@@ -354,11 +415,7 @@ public static class ConfigBuilder
             "IP-CIDR6,fe80::/10,DIRECT,no-resolve"
         };
 
-        // Critical services first — before QUIC/STUN rejects, so Cursor/GitHub are not blackholed.
-        foreach (var rule in AlwaysProxyRules())
-            rules.Add(rule);
-
-        // WebRTC / STUN / TURN — real IP leak vector
+        // WebRTC / STUN / TURN — real IP leak vector (before UDP-FAST so 3478 never hairpins to a node)
         if (settings.BlockStun || stealth)
         {
             rules.Add("DOMAIN-SUFFIX,stun.cloudflare.com,REJECT");
@@ -371,9 +428,35 @@ public static class ConfigBuilder
             rules.Add("AND,((NETWORK,udp),(DST-PORT,5349)),REJECT");
         }
 
-        // QUIC to everything else goes through PROXY (REJECT made Cursor/GitHub hang on HTTP/3).
+        // These controls must precede process and domain allow-rules.
+        // Rejecting HTTP/3 makes browsers retry over TLS/TCP through the selected proxy.
         if (settings.BlockQuic || stealth)
-            rules.Add("AND,((NETWORK,udp),(DST-PORT,443)),PROXY");
+            rules.Add("AND,((NETWORK,udp),(DST-PORT,443)),REJECT");
+
+        foreach (var rule in AlwaysProxyRules())
+            rules.Add(rule);
+
+        if (settings.PerAppFastPath)
+        {
+            foreach (var proc in (settings.FastPathProcesses ?? "")
+                         .Split(['\r', '\n', ',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var name = proc.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? proc : proc + ".exe";
+                rules.Add($"PROCESS-NAME,{name},PROXY");
+            }
+        }
+
+        // Split UDP: game/VoIP ports → UDP-FAST (only if group exists)
+        var hasUdpFast = GetList(doc, "proxy-groups")
+            .Any(g => NameOf(g).Equals("UDP-FAST", StringComparison.OrdinalIgnoreCase));
+        if (settings.SplitUdpPolicy && hasUdpFast)
+        {
+            foreach (var portSpec in ParsePortSpecs(settings.UdpFastPorts))
+            {
+                if (portSpec is "3478" or "5349") continue;
+                rules.Add($"AND,((NETWORK,udp),(DST-PORT,{portSpec})),UDP-FAST");
+            }
+        }
 
         // IP-check hosts always via PROXY — for leak test + hide real IP from those APIs
         rules.Add("DOMAIN-SUFFIX,ipify.org,PROXY");
@@ -467,6 +550,22 @@ public static class ConfigBuilder
 
         Set(doc, "rule-providers", providers);
         Set(doc, "rules", rules);
+    }
+
+    static IEnumerable<string> ParsePortSpecs(string? raw)
+    {
+        foreach (var part in (raw ?? "")
+                     .Split([',', ' ', ';', '\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (part.Contains('-', StringComparison.Ordinal))
+            {
+                var bits = part.Split('-', 2, StringSplitOptions.TrimEntries);
+                if (int.TryParse(bits[0], out var a) && int.TryParse(bits[1], out var b) && a > 0 && b >= a && b <= 65535)
+                    yield return a + "-" + b;
+            }
+            else if (int.TryParse(part, out var p) && p > 0 && p <= 65535)
+                yield return part;
+        }
     }
 
     static Dictionary<object, object> ProviderFile(string behavior, string fileName) => new()
@@ -584,5 +683,11 @@ public static class ConfigBuilder
         }
         if (existing != null) doc.Remove(existing);
         doc[key] = value;
+    }
+
+    static void Remove(Dictionary<object, object> doc, params string[] keys)
+    {
+        foreach (var key in doc.Keys.Where(k => keys.Contains(k?.ToString(), StringComparer.OrdinalIgnoreCase)).ToList())
+            doc.Remove(key);
     }
 }

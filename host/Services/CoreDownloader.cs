@@ -11,12 +11,13 @@ public sealed class CoreDownloader
     static readonly HttpClient Http = CreateClient();
     public int Progress { get; private set; }
     public string Stage { get; private set; } = "idle";
-    public bool Busy { get; private set; }
+    int _busy;
+    public bool Busy => Volatile.Read(ref _busy) != 0;
 
     public async Task InstallAsync(string channel, CancellationToken ct = default)
     {
-        if (Busy) throw new InvalidOperationException("Загрузка уже идёт.");
-        Busy = true;
+        if (Interlocked.CompareExchange(ref _busy, 1, 0) != 0)
+            throw new InvalidOperationException("Загрузка уже идёт.");
         Progress = 0;
         try
         {
@@ -38,10 +39,13 @@ public sealed class CoreDownloader
             Progress = 100;
             Stage = "ready";
         }
-        finally
+        catch (OperationCanceledException)
         {
-            Busy = false;
+            Stage = "cancelled";
+            throw;
         }
+        catch { Stage = "error"; throw; }
+        finally { Volatile.Write(ref _busy, 0); }
     }
 
     async Task<string> ResolveMihomoUrl(string channel, CancellationToken ct)
@@ -96,30 +100,44 @@ public sealed class CoreDownloader
         var zipPath = Path.Combine(AppPaths.Cores, "wintun.zip");
         await DownloadFile("https://www.wintun.net/builds/wintun-0.14.1.zip", zipPath, ct);
         var arch = RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? "arm64" : "amd64";
-        using var zip = ZipFile.OpenRead(zipPath);
-        var entry = zip.Entries.FirstOrDefault(e =>
-            e.FullName.Replace('\\', '/').EndsWith($"bin/{arch}/wintun.dll", StringComparison.OrdinalIgnoreCase))
-            ?? throw new InvalidOperationException("wintun.dll не найден в архиве.");
-        entry.ExtractToFile(AppPaths.WintunDll, true);
-        TryDelete(zipPath);
+        try
+        {
+            using var zip = ZipFile.OpenRead(zipPath);
+            var entry = zip.Entries.FirstOrDefault(e =>
+                e.FullName.Replace('\\', '/').EndsWith($"bin/{arch}/wintun.dll", StringComparison.OrdinalIgnoreCase))
+                ?? throw new InvalidOperationException("wintun.dll не найден в архиве.");
+            ExtractBinary(entry, AppPaths.WintunDll);
+        }
+        finally { TryDelete(zipPath); }
     }
 
     async Task DownloadFile(string url, string dest, CancellationToken ct)
     {
-        using var res = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
-        res.EnsureSuccessStatusCode();
-        var total = res.Content.Headers.ContentLength ?? 0;
-        await using var input = await res.Content.ReadAsStreamAsync(ct);
-        await using var output = File.Create(dest);
-        var buffer = new byte[81920];
-        long read = 0;
-        int n;
-        while ((n = await input.ReadAsync(buffer, ct)) > 0)
+        var temp = dest + ".download";
+        try
         {
-            await output.WriteAsync(buffer.AsMemory(0, n), ct);
-            read += n;
-            if (total > 0) Progress = (int)(read * 90 / total);
+            using var res = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+            res.EnsureSuccessStatusCode();
+            var total = res.Content.Headers.ContentLength ?? 0;
+            await using var input = await res.Content.ReadAsStreamAsync(ct);
+            long read = 0;
+            await using (var output = File.Create(temp))
+            {
+                var buffer = new byte[81920];
+                int n;
+                while ((n = await input.ReadAsync(buffer, ct)) > 0)
+                {
+                    await output.WriteAsync(buffer.AsMemory(0, n), ct);
+                    read += n;
+                    if (total > 0) Progress = Math.Clamp((int)(read * 90 / total), 0, 90);
+                }
+            }
+            if (read == 0 || total > 0 && read != total)
+                throw new InvalidDataException("Архив ядра загружен не полностью.");
+            ct.ThrowIfCancellationRequested();
+            File.Move(temp, dest, true);
         }
+        finally { TryDelete(temp); }
     }
 
     static void ExtractExe(string zipPath, string destExe)
@@ -128,7 +146,21 @@ public sealed class CoreDownloader
         var entry = zip.Entries.FirstOrDefault(e =>
             e.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
             ?? throw new InvalidOperationException("В архиве нет exe ядра.");
-        entry.ExtractToFile(destExe, true);
+        ExtractBinary(entry, destExe);
+    }
+
+    static void ExtractBinary(ZipArchiveEntry entry, string destination)
+    {
+        var temp = destination + ".new";
+        try
+        {
+            entry.ExtractToFile(temp, true);
+            using (var file = File.OpenRead(temp))
+                if (file.Length < 64 || file.ReadByte() != 'M' || file.ReadByte() != 'Z')
+                    throw new InvalidDataException("В архиве нет корректного исполняемого файла Windows.");
+            File.Move(temp, destination, true);
+        }
+        finally { TryDelete(temp); }
     }
 
     static void TryDelete(string path)

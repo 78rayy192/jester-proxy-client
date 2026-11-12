@@ -13,6 +13,10 @@ public partial class App : WinApp
     CoreManager? _core;
     JesterApi? _api;
     TrayService? _tray;
+    NetworkGuardian? _guardian;
+    System.Windows.Threading.DispatcherTimer? _subscriptionTimer;
+    readonly CancellationTokenSource _shutdown = new();
+    int _updatingSubscriptions;
 
     void OnStartup(object sender, StartupEventArgs e)
     {
@@ -30,6 +34,11 @@ public partial class App : WinApp
         _profiles = new ProfileStore();
         _core = new CoreManager(_settings, _profiles, new CoreDownloader());
         _api = new JesterApi(_settings, _profiles, _core);
+        _guardian = new NetworkGuardian(_settings, _core);
+        _core.Guardian = _guardian;
+        _guardian.Start();
+        if (_settings.Current.DeadManSwitch && _settings.Current.DeadManArmed)
+            _guardian.ArmFailClosed();
         try { _api.Start(); }
         catch (Exception ex)
         {
@@ -39,6 +48,7 @@ public partial class App : WinApp
         }
 
         var window = new MainWindow(_settings);
+        WindowActions.ApplyAppearance = () => window.Dispatcher.Invoke(window.ApplyAppearance);
         _tray = new TrayService(new TrayHost
         {
             Show = () =>
@@ -75,22 +85,30 @@ public partial class App : WinApp
                         s.TunEnabled = false;
                     });
                     if (needRestart) _ = _core.RestartAsync();
-                    else Services.SystemProxy.Set(true, _settings.Current.MixedPort);
+                    else if (_core.Running) Services.SystemProxy.Set(true, _settings.Current.MixedPort);
                 }
                 else
                 {
                     Services.SystemProxy.Set(false, 0);
                     _settings.Patch(s => s.SystemProxy = false);
                 }
+            },
+            SelectedNode = () => _settings.Current.LastSelectedNode,
+            Panic = async () =>
+            {
+                var r = await _core.PhantomPanicAsync();
+                return r.Message;
             }
         });
 
-        WindowActions.Minimize = () => window.WindowState = WindowState.Minimized;
-        WindowActions.ToggleMaximize = () =>
+        StartSubscriptionTimer();
+
+        WindowActions.Minimize = () => window.Dispatcher.Invoke(() => window.WindowState = WindowState.Minimized);
+        WindowActions.ToggleMaximize = () => window.Dispatcher.Invoke(() =>
             window.WindowState = window.WindowState == WindowState.Maximized
                 ? WindowState.Normal
-                : WindowState.Maximized;
-        WindowActions.CloseOrTray = hide =>
+                : WindowState.Maximized);
+        WindowActions.CloseOrTray = hide => window.Dispatcher.Invoke(() =>
         {
             if (hide)
             {
@@ -99,7 +117,7 @@ public partial class App : WinApp
             }
             _core.Stop();
             Shutdown();
-        };
+        });
         WindowActions.ApplyCapture = () =>
         {
             try { Current.Dispatcher.Invoke(() => window.ApplyCaptureProtection()); }
@@ -136,9 +154,51 @@ public partial class App : WinApp
         else window.Show();
     }
 
+    void StartSubscriptionTimer()
+    {
+        _subscriptionTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromMinutes(30)
+        };
+        _subscriptionTimer.Tick += async (_, _) => await TickSubscriptions();
+        _subscriptionTimer.Start();
+        _ = Task.Run(async () =>
+        {
+            try { await Task.Delay(8000, _shutdown.Token); await TickSubscriptions(); }
+            catch { /* ignore */ }
+        });
+    }
+
+    async Task TickSubscriptions()
+    {
+        if (Interlocked.CompareExchange(ref _updatingSubscriptions, 1, 0) != 0) return;
+        try
+        {
+            if (_settings == null || _profiles == null || _core == null) return;
+            var s = _settings.Current;
+            if (!s.AutoUpdateSubscriptions) return;
+            var hours = Math.Max(1, s.AutoUpdateIntervalHours);
+            if (s.LastSubscriptionUpdateAt is { } last
+                && DateTimeOffset.UtcNow - last < TimeSpan.FromHours(hours))
+                return;
+            var pid = _core.Pid;
+            var (updated, _, _) = await _profiles.UpdateAllSubscriptionsAsync(_shutdown.Token);
+            _shutdown.Token.ThrowIfCancellationRequested();
+            _settings.Patch(x => x.LastSubscriptionUpdateAt = DateTimeOffset.UtcNow);
+            if (updated > 0 && _core.Running && pid == _core.Pid)
+                await _core.RestartIfRunningAsync(_shutdown.Token);
+        }
+        catch { /* ignore background failures */ }
+        finally { Interlocked.Exchange(ref _updatingSubscriptions, 0); }
+    }
+
     void OnExit(object sender, ExitEventArgs e)
     {
-        _core?.Stop();
+        // Keep DeadManArmed across restarts so startup can re-arm the sink.
+        _shutdown.Cancel();
+        _subscriptionTimer?.Stop();
+        _guardian?.Dispose();
+        _core?.Dispose();
         _api?.Dispose();
         _tray?.Dispose();
         _mutex?.Dispose();

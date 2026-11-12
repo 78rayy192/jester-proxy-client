@@ -4,6 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Jester</title>
+    <script>
+      document.addEventListener('contextmenu', function (e) { e.preventDefault() })
+      document.addEventListener('selectstart', function (e) {
+        var node = e.target
+        if (!node || !node.closest || !node.closest('input, textarea')) e.preventDefault()
+      })
+    </script>
     <link rel="icon" type="image/png" href="/jester.png" />
   </head>
   <body>

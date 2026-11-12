@@ -1,4 +1,5 @@
 using System.Net.Http;
+using System.Collections.Concurrent;
 using Jester.Host.Models;
 
 namespace Jester.Host.Services;
@@ -13,6 +14,7 @@ public sealed class RuleListService
     public const string CustomDirectFile = "custom-direct.txt";
 
     static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(3) };
+    static readonly ConcurrentDictionary<string, SemaphoreSlim> Downloads = new(StringComparer.OrdinalIgnoreCase);
 
     public static string RulesDir => Path.Combine(AppPaths.Run, "ruleset");
 
@@ -23,40 +25,19 @@ public sealed class RuleListService
         WriteText(CustomDirectFile, settings.CustomDirectRules);
         if (!settings.RefilterEnabled) return;
 
-        if (settings.UseMrsRules)
-        {
-            var dMrs = Path.Combine(RulesDir, DomainsMrsFile);
-            var iMrs = Path.Combine(RulesDir, IpsMrsFile);
-            if (IsStale(dMrs) || !File.Exists(dMrs))
-                await DownloadAsync(settings.RefilterDomainsMrsUrl, dMrs, ct);
-            if (settings.RefilterUseIp && (IsStale(iMrs) || !File.Exists(iMrs)))
-                await DownloadAsync(settings.RefilterIpMrsUrl, iMrs, ct);
-            return;
-        }
-
-        var domains = Path.Combine(RulesDir, DomainsFile);
-        var ips = Path.Combine(RulesDir, IpsFile);
-        if (IsStale(domains) || !File.Exists(domains))
-            await DownloadAsync(settings.RefilterDomainsUrl, domains, ct);
-        if (settings.RefilterUseIp && (IsStale(ips) || !File.Exists(ips)))
-            await DownloadAsync(settings.RefilterIpUrl, ips, ct);
+        // Mihomo's HTTP providers refresh cached lists themselves. Reuse a valid
+        // cache immediately; a stale remote source must not stall every reconnect.
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(TimeSpan.FromSeconds(15));
+        await Task.WhenAll(RequiredLists(settings)
+            .Where(list => !UsableCache(list.Path))
+            .Select(list => DownloadAsync(list.Url, list.Path, budget.Token, onlyMissing: true)));
     }
 
     public static async Task<RuleListStatus> UpdateAsync(AppSettings settings, CancellationToken ct = default)
     {
         Directory.CreateDirectory(RulesDir);
-        if (settings.UseMrsRules)
-        {
-            await DownloadAsync(settings.RefilterDomainsMrsUrl, Path.Combine(RulesDir, DomainsMrsFile), ct);
-            if (settings.RefilterUseIp)
-                await DownloadAsync(settings.RefilterIpMrsUrl, Path.Combine(RulesDir, IpsMrsFile), ct);
-        }
-        else
-        {
-            await DownloadAsync(settings.RefilterDomainsUrl, Path.Combine(RulesDir, DomainsFile), ct);
-            if (settings.RefilterUseIp)
-                await DownloadAsync(settings.RefilterIpUrl, Path.Combine(RulesDir, IpsFile), ct);
-        }
+        await Task.WhenAll(RequiredLists(settings).Select(list => DownloadAsync(list.Url, list.Path, ct)));
         WriteText(CustomProxyFile, settings.CustomProxyRules);
         WriteText(CustomDirectFile, settings.CustomDirectRules);
         return Status(settings);
@@ -81,15 +62,38 @@ public sealed class RuleListService
         };
     }
 
-    static async Task DownloadAsync(string url, string dest, CancellationToken ct)
+    static IEnumerable<(string Url, string Path)> RequiredLists(AppSettings settings)
     {
-        using var res = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
-        res.EnsureSuccessStatusCode();
-        var tmp = dest + ".tmp";
-        await using (var fs = File.Create(tmp))
-            await res.Content.CopyToAsync(fs, ct);
-        File.Copy(tmp, dest, true);
-        File.Delete(tmp);
+        yield return settings.UseMrsRules
+            ? (settings.RefilterDomainsMrsUrl, Path.Combine(RulesDir, DomainsMrsFile))
+            : (settings.RefilterDomainsUrl, Path.Combine(RulesDir, DomainsFile));
+        if (settings.RefilterUseIp)
+            yield return settings.UseMrsRules
+                ? (settings.RefilterIpMrsUrl, Path.Combine(RulesDir, IpsMrsFile))
+                : (settings.RefilterIpUrl, Path.Combine(RulesDir, IpsFile));
+    }
+
+    static async Task DownloadAsync(string url, string dest, CancellationToken ct, bool onlyMissing = false)
+    {
+        var gate = Downloads.GetOrAdd(dest, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct);
+        var tmp = dest + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            if (onlyMissing && UsableCache(dest)) return;
+            using var res = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+            res.EnsureSuccessStatusCode();
+            await using (var fs = File.Create(tmp))
+                await res.Content.CopyToAsync(fs, ct);
+            if (!UsableCache(tmp)) throw new InvalidDataException("Получен пустой список правил.");
+            ct.ThrowIfCancellationRequested();
+            File.Move(tmp, dest, true);
+        }
+        finally
+        {
+            try { File.Delete(tmp); } catch { /* best effort */ }
+            gate.Release();
+        }
     }
 
     static void WriteText(string name, string content)
@@ -102,14 +106,18 @@ public sealed class RuleListService
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
         if (lines.Count == 0) lines.Add("# empty");
-        File.WriteAllLines(path, lines);
+        var text = string.Join(Environment.NewLine, lines) + Environment.NewLine;
+        if (File.Exists(path) && File.ReadAllText(path) == text) return;
+        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllText(temporary, text);
+            File.Move(temporary, path, true);
+        }
+        finally { try { File.Delete(temporary); } catch { /* best effort */ } }
     }
 
-    static bool IsStale(string path)
-    {
-        if (!File.Exists(path) || new FileInfo(path).Length < 32) return true;
-        return DateTime.UtcNow - File.GetLastWriteTimeUtc(path) > TimeSpan.FromHours(20);
-    }
+    static bool UsableCache(string path) => File.Exists(path) && new FileInfo(path).Length >= 32;
 
     static int CountLines(string path)
     {

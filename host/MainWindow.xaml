@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
         Title="Jester"
-        Icon="pack://application:,,,/Assets/jester.ico"
+        Icon="pack://application:,,,/Jester;component/Assets/jester.ico"
         Width="1280"
         Height="820"
         MinWidth="980"
@@ -11,7 +11,7 @@
         WindowStartupLocation="CenterScreen"
         WindowStyle="None"
         ResizeMode="CanResize"
-        Background="#050505"
+        Background="#0B101B"
         Foreground="#F5F5F5">
     <WindowChrome.WindowChrome>
         <WindowChrome CaptionHeight="0"
@@ -19,9 +19,9 @@
                       GlassFrameThickness="0"
                       CornerRadius="8" />
     </WindowChrome.WindowChrome>
-    <Border BorderBrush="#22FFFFFF" BorderThickness="1" CornerRadius="8" Background="#050505">
+    <Border x:Name="WindowFrame" BorderBrush="#32FFFFFF" BorderThickness="1" CornerRadius="12" Background="#0B101B">
         <Grid>
-            <wv2:WebView2 x:Name="Web" Visibility="Collapsed" DefaultBackgroundColor="#111114" />
+            <wv2:WebView2 x:Name="Web" Visibility="Collapsed" DefaultBackgroundColor="Transparent" />
             <StackPanel x:Name="Boot" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="48">
                 <TextBlock Text="JESTER" FontSize="22" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,0,0,18" Foreground="#F5F5F5" />
                 <ProgressBar x:Name="BootBar" IsIndeterminate="True" Height="2" Width="220" Foreground="#F5F5F5" Background="#2A2A2A" BorderThickness="0" />

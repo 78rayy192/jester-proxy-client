@@ -1,10 +1,12 @@
+import { useShallow } from 'zustand/react/shallow'
 import { useEffect, useState } from 'react'
 import { api, clash, type ClashRule, type RuleListStatus } from '../lib/api'
 import { t } from '../lib/i18n'
 import { useApp } from '../store/app'
+import { MenuSelect } from '../components/MenuSelect'
 
 export function Rules() {
-  const { settings, status, busy, patchSettings, run, refresh } = useApp()
+  const { settings, status, busy, patchSettings, run, refresh } = useApp(useShallow(({ settings, status, busy, patchSettings, run, refresh }) => ({ settings, status, busy, patchSettings, run, refresh })))
   const i = t(settings?.language || 'ru')
   const [rules, setRules] = useState<ClashRule[]>([])
   const [list, setList] = useState<RuleListStatus | null>(null)
@@ -80,13 +82,13 @@ export function Rules() {
           </div>
           <div className="field row">
             <div><label>Остальной трафик</label><div className="hint">Правило применяется в конце списка</div></div>
-            <select value={settings.finalOutbound || 'DIRECT'} onChange={(e) => run(async () => {
-              await patchSettings({ finalOutbound: e.target.value })
+            <MenuSelect label="Остальной трафик" value={settings.finalOutbound || 'DIRECT'} onChange={(value) => run(async () => {
+              await patchSettings({ finalOutbound: value })
               if (status?.running) await api.restart()
-            })}>
-              <option value="DIRECT">Напрямую</option>
-              <option value="PROXY">Через туннель</option>
-            </select>
+            })} options={[
+              { value: 'DIRECT', label: 'Напрямую' },
+              { value: 'PROXY', label: 'Через туннель' },
+            ]} />
           </div>
           <div className="stat" style={{ fontSize: 15, marginTop: 8 }}>
             {list ? <>доменов {list.domainsCount.toLocaleString('ru')} · адресов {list.ipsCount.toLocaleString('ru')}</> : 'Список не загружен'}
