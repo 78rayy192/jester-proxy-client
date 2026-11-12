@@ -1,0 +1,5 @@
+# The downloadable client is the Rust host. The C# project is the previous host.
+host/** linguist-vendored
+tests/** linguist-vendored
+*.dll linguist-generated
+*.ico linguist-generated
