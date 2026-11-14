@@ -142,6 +142,9 @@ pub fn device_id() -> String {
     id
 }
 
+const DEVICE_OS: &str = if cfg!(windows) { "Windows" } else { "Linux" };
+const OS_VER: &str = if cfg!(windows) { "10.0" } else { "linux" };
+
 fn download(url: &str) -> Result<DownloadMeta, String> {
     let url = unwrap(url);
     if !(url.starts_with("http://") || url.starts_with("https://")) {
@@ -149,11 +152,11 @@ fn download(url: &str) -> Result<DownloadMeta, String> {
     }
     let client = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(45)).build().map_err(|e| e.to_string())?;
     let res = client.get(&url)
-        .header("User-Agent", "Happ/3.13.0/Windows")
+        .header("User-Agent", format!("Happ/3.13.0/{DEVICE_OS}"))
         .header("Accept", "*/*")
         .header("x-hwid", device_id())
-        .header("x-device-os", "Windows")
-        .header("x-ver-os", "10.0")
+        .header("x-device-os", DEVICE_OS)
+        .header("x-ver-os", OS_VER)
         .header("x-device-model", "Jester")
         .send()
         .map_err(|e| e.to_string())?;

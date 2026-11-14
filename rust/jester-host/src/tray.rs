@@ -1,5 +1,5 @@
 use crate::api::AppState;
-use crate::{paths, profiles};
+use crate::{paths, profiles, sysproxy};
 use std::sync::Arc;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
@@ -65,8 +65,8 @@ pub fn build(app: &AppState) -> Menu {
     }
     let transport = Submenu::new("Режим транспорта", true);
     let _ = transport.append(&CheckMenuItem::with_id("tr:tun", "Системный туннель", true, s.tun_enabled, None));
-    let _ = transport.append(&CheckMenuItem::with_id("tr:proxy", "Системный прокси", true, s.system_proxy && !s.tun_enabled, None));
-    let _ = transport.append(&CheckMenuItem::with_id("tr:local", "Локальный прокси", true, !s.tun_enabled && !s.system_proxy, None));
+    let _ = transport.append(&CheckMenuItem::with_id("tr:proxy", "Системный прокси", true, s.system_proxy, None));
+    let _ = transport.append(&CheckMenuItem::with_id("tr:local", "Только локальные порты", true, !s.tun_enabled && !s.system_proxy, None));
     let import = MenuItem::with_id("import", "Импорт из буфера обмена", true, None);
     let route = Submenu::new("Маршрутизация", true);
     let _ = route.append(&CheckMenuItem::with_id("mode:rule", "По правилам", true, s.mode == "rule", None));
@@ -92,9 +92,8 @@ pub fn build(app: &AppState) -> Menu {
 pub fn handle(app: &Arc<AppState>, id: &str) -> bool {
     if id == "quit" { return true; }
     if id == "power" {
-        let settings = app.settings.current();
         if app.core.running() { app.core.stop(); }
-        else { let _ = app.core.start(&settings); }
+        else { let _ = app.core.start(&app.settings); }
     } else if let Some(name) = id.strip_prefix("srv:") {
         let name = name.to_string();
         let _ = app.settings.patch(|s| s.last_selected_node = name.clone());
@@ -102,11 +101,19 @@ pub fn handle(app: &Arc<AppState>, id: &str) -> bool {
         if app.core.running() { app.core.select(settings.external_port, "PROXY", &name); }
     } else if let Some(mode) = id.strip_prefix("tr:") {
         let mode = mode.to_string();
-        let _ = app.settings.patch(|s| {
-            s.tun_enabled = mode == "tun";
-            s.system_proxy = mode == "proxy";
-        });
-        restart_if_needed(app);
+        if mode == "proxy" {
+            let enable = !app.settings.current().system_proxy;
+            let port = app.settings.current().mixed_port;
+            let _ = app.settings.patch(|s| s.system_proxy = enable);
+            let _ = sysproxy::set(enable, port);
+        } else if mode == "tun" {
+            let _ = app.settings.patch(|s| s.tun_enabled = !s.tun_enabled);
+            restart_if_needed(app);
+        } else if mode == "local" {
+            let _ = app.settings.patch(|s| { s.tun_enabled = false; s.system_proxy = false; });
+            let _ = sysproxy::set(false, 0);
+            restart_if_needed(app);
+        }
     } else if let Some(mode) = id.strip_prefix("mode:") {
         let mode = mode.to_string();
         let _ = app.settings.patch(|s| s.mode = mode);
@@ -120,8 +127,7 @@ pub fn handle(app: &Arc<AppState>, id: &str) -> bool {
 
 fn restart_if_needed(app: &AppState) {
     if !app.core.running() { return; }
-    let settings = app.settings.current();
-    let _ = app.core.restart(&settings);
+    let _ = app.core.restart(&app.settings);
 }
 
 fn import_clipboard(app: &AppState) {
@@ -137,7 +143,7 @@ fn import_clipboard(app: &AppState) {
         Ok(info) => {
             let _ = app.settings.patch(|s| s.active_profile_id = info.id.clone());
             if app.core.running() {
-                let _ = app.core.restart(&app.settings.current());
+                let _ = app.core.restart(&app.settings);
             }
             notice("Профиль импортирован.");
         }
@@ -187,7 +193,18 @@ fn clipboard_text() -> Option<String> {
         return text.filter(|s| !s.trim().is_empty());
     }
     #[cfg(not(windows))]
-    { None }
+    {
+        for (bin, args) in [("wl-paste", &["-n"][..]), ("xclip", &["-selection", "clipboard", "-o"][..])] {
+            let output = std::process::Command::new(bin).args(args).output();
+            if let Ok(output) = output {
+                if output.status.success() {
+                    let text = String::from_utf8_lossy(&output.stdout).to_string();
+                    if !text.trim().is_empty() { return Some(text); }
+                }
+            }
+        }
+        None
+    }
 }
 
 fn notice(text: &str) {
@@ -199,5 +216,10 @@ fn notice(text: &str) {
         let wide: Vec<u16> = std::ffi::OsStr::new(text).encode_wide().chain(std::iter::once(0)).collect();
         let title: Vec<u16> = "Jester".encode_utf16().chain(std::iter::once(0)).collect();
         let _ = MessageBoxW(None, PCWSTR(wide.as_ptr()), PCWSTR(title.as_ptr()), MB_OK);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("notify-send").args(["Jester", text]).status();
+        eprintln!("Jester: {text}");
     }
 }

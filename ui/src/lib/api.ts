@@ -11,6 +11,8 @@ export type CoreStatus = {
   downloadProgress: number
   activeProfileId: string
   mode: string
+  os?: string
+  tunUp?: boolean
 }
 
 export type Appearance = {
@@ -229,9 +231,9 @@ export const api = {
   disarmDeadMan: () => req<{ ok: boolean; deadManArmed: boolean }>('/api/guardian/disarm', { method: 'POST' }),
   warmStart: () => req<{ ok: boolean }>('/api/guardian/warm', { method: 'POST' }),
   learnDirect: () => req<{ ok: boolean; message: string; domains?: string[] }>('/api/guardian/learn-direct', { method: 'POST' }),
-  start: () => req<CoreStatus>('/api/core/start', { method: 'POST' }, 90000),
+  start: () => req<CoreStatus>('/api/core/start', { method: 'POST' }, 20000),
   stop: () => req<CoreStatus>('/api/core/stop', { method: 'POST' }),
-  restart: () => req<CoreStatus>('/api/core/restart', { method: 'POST' }, 90000),
+  restart: () => req<CoreStatus>('/api/core/restart', { method: 'POST' }, 20000),
   download: () => req<CoreStatus>('/api/core/download', { method: 'POST' }, 180000),
   elevate: () => req('/api/core/elevate', { method: 'POST' }),
   logs: () => req<{ text: string }>('/api/logs'),

@@ -112,9 +112,9 @@ function applyTheme() {
 }
 
 function LiveChip() {
-  const { live, settings } = useApp(useShallow(({ live, settings }) => ({ live, settings })))
+  const { live, settings, status } = useApp(useShallow(({ live, settings, status }) => ({ live, settings, status })))
   return <div className="live-chip">
-    <span className="route-mini">{routeLabel(settings)}</span>
+    <span className="route-mini">{routeLabel(settings, status)}</span>
     <span>↓ {formatSpeed(live.down)}</span>
     <span>↑ {formatSpeed(live.up)}</span>
     {live.now ? <span className="now-chip">{live.now}</span> : null}
@@ -273,7 +273,7 @@ export function App() {
           if (st?.running) await api.stop()
           else {
             const r = await api.start()
-            if (r.needsAdmin || r.message === 'admin-required') await api.elevate()
+            if (r.os !== 'linux' && (r.needsAdmin || r.message === 'admin-required')) await api.elevate()
           }
         })
       }

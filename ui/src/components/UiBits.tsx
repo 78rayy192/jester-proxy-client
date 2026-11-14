@@ -146,9 +146,14 @@ export function formatExpire(unix?: number) {
   return d.toLocaleDateString('ru-RU')
 }
 
-export function routeLabel(settings?: { tunEnabled?: boolean; systemProxy?: boolean; mode?: string } | null) {
+export function routeLabel(
+  settings?: { tunEnabled?: boolean; systemProxy?: boolean; mode?: string } | null,
+  status?: { running?: boolean; tunUp?: boolean } | null,
+) {
   if (!settings) return 'Не задано'
-  if (settings.tunEnabled) return 'Системный туннель'
+  const tunLive = !!settings.tunEnabled && !(status?.running && status.tunUp === false)
+  if (tunLive && settings.systemProxy) return 'Туннель и прокси'
+  if (tunLive) return 'Системный туннель'
   if (settings.systemProxy) return 'Системный прокси'
   if (settings.mode === 'direct') return 'Прямое соединение'
   return 'Локальный прокси'

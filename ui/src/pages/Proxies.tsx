@@ -110,22 +110,13 @@ export function Proxies() {
   }
 
   async function toggleTun() {
-    const on = !settings?.tunEnabled
-    if (on) {
-      await api.sysproxy(false).catch(() => undefined)
-      await useApp.getState().patchSettings({ tunEnabled: true, systemProxy: false })
-      if (status?.running) await api.restart()
-    } else {
-      await useApp.getState().patchSettings({ tunEnabled: false })
-      if (status?.running) await api.restart()
-    }
+    await useApp.getState().patchSettings({ tunEnabled: !settings?.tunEnabled })
+    if (status?.running) await api.restart()
     await refresh()
-    const s = await api.sysproxyStatus().catch(() => null)
-    if (s) setWinProxy(!!s.windowsProxy)
   }
 
   async function toggleSysProxy() {
-    const on = !(settings?.systemProxy && !settings?.tunEnabled && winProxy)
+    const on = !(settings?.systemProxy && winProxy)
     const res = await api.sysproxy(on)
     await refresh()
     setWinProxy(!!res.windowsProxy)
@@ -155,7 +146,7 @@ export function Proxies() {
   else if (onlyFav) names = favFirst
   else names = [...favorites.filter((f) => names.includes(f)), ...names.filter((n) => !favorites.includes(n))]
 
-  const proxyOn = !!(settings?.systemProxy && !settings?.tunEnabled)
+  const proxyOn = !!(settings?.systemProxy && winProxy)
   const current = splitServerName(now)
 
   return (
@@ -186,11 +177,11 @@ export function Proxies() {
           <div>
             <div className="k">{i.sysProxy}</div>
             <div className="hint">
-              Windows → 127.0.0.1:{settings?.mixedPort}
+              {status?.os === 'linux' ? 'GTK' : 'Windows'} → 127.0.0.1:{settings?.mixedPort}
               {winProxy ? ' · включён в системе' : ' · отключён в системе'}
             </div>
           </div>
-          <button type="button" role="switch" aria-label="Системный прокси Windows" aria-checked={proxyOn && winProxy} className={'toggle' + (proxyOn && winProxy ? ' on' : '')} disabled={busy} onClick={() => run(toggleSysProxy)} />
+          <button type="button" role="switch" aria-label={status?.os === 'linux' ? 'Системный прокси' : 'Системный прокси Windows'} aria-checked={proxyOn && winProxy} className={'toggle' + (proxyOn && winProxy ? ' on' : '')} disabled={busy} onClick={() => run(toggleSysProxy)} />
         </div>
         <div className="mode-card">
           <div>
