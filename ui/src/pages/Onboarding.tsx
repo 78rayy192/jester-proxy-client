@@ -43,12 +43,14 @@ export function Onboarding() {
     },
     {
       title: 'Запуск',
-      text: 'Выберите режим маршрутизации и запустите подключение. Для системного туннеля нужны права администратора.',
+      text: status?.os === 'linux'
+        ? 'Выберите режим и запустите подключение. Туннель и системный прокси включаются вместе.'
+        : 'Выберите режим маршрутизации и запустите подключение. Для системного туннеля нужны права администратора.',
       done: !!status?.running,
       action: (
         <button className="btn primary" disabled={busy || !!status?.running || !status?.coreInstalled || !profiles.length} onClick={() => run(async () => {
           const r = await api.start()
-          if (r.needsAdmin || r.message === 'admin-required') await api.elevate()
+          if (r.os !== 'linux' && (r.needsAdmin || r.message === 'admin-required')) await api.elevate()
           await refresh()
         })}>
           {status?.running ? 'Активен' : 'Запустить'}

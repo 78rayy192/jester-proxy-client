@@ -98,7 +98,7 @@ export function Dashboard() {
   const score = leak?.score
   const node = selectedNode || settings?.lastSelectedNode || ''
   const nodeLabel = splitServerName(node)
-  const route = routeLabel(settings)
+  const route = routeLabel(settings, status)
   const noCore = !status?.coreInstalled
   const noProfile = !active
 
@@ -107,7 +107,7 @@ export function Dashboard() {
       if (status?.running) await api.stop()
       else {
         const r = await api.start()
-        if (r.needsAdmin || r.message === 'admin-required') await api.elevate()
+        if (r.os !== 'linux' && (r.needsAdmin || r.message === 'admin-required')) await api.elevate()
       }
     })
   }
@@ -198,6 +198,12 @@ export function Dashboard() {
         </div>
       </div>
 
+      {status?.running && settings?.tunEnabled && status.tunUp === false && (
+        <div className="banner warn" style={{ marginBottom: 14 }}>
+          Туннель не поднялся: нет права создать сетевой адаптер. Системный прокси и локальные порты при этом работают.
+        </div>
+      )}
+
       {guardian?.deadManArmed && (
         <div className="banner danger" style={{ marginBottom: 14 }}>
           Защитная блокировка прокси после сбоя ядра.
@@ -237,13 +243,13 @@ export function Dashboard() {
             <span className="server-chevron" aria-hidden="true">↗</span>
           </button>
           <div className="btn-row hero-actions">
-            {status?.needsAdmin && <button className="btn" onClick={() => run(() => api.elevate())}>{i.elevate}</button>}
+            {status?.os !== 'linux' && status?.needsAdmin && <button className="btn" onClick={() => run(() => api.elevate())}>{i.elevate}</button>}
             <button className="btn" disabled={busy || !status?.running} onClick={() => run(() => api.restart())}>{i.restart}</button>
             <button className="btn" disabled={busy} onClick={() => run(async () => {
-              await patchSettings({ tunEnabled: !settings?.tunEnabled, systemProxy: settings?.tunEnabled ? settings.systemProxy : false })
+              await patchSettings({ tunEnabled: !settings?.tunEnabled })
               if (status?.running) await api.restart()
             })}>
-              {settings?.tunEnabled ? i.mixed : i.tun}
+              {settings?.tunEnabled ? 'Выключить туннель' : 'Включить туннель'}
             </button>
           </div>
           <div className="preset-row performance-presets" role="group" aria-label="Приоритет подключения">

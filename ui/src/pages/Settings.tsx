@@ -23,8 +23,9 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
 }
 
 export function Settings() {
-  const { settings, busy, patchSettings, run, refresh } = useApp(useShallow(({ settings, busy, patchSettings, run, refresh }) => ({ settings, busy, patchSettings, run, refresh })))
+  const { settings, status, busy, patchSettings, run, refresh } = useApp(useShallow(({ settings, status, busy, patchSettings, run, refresh }) => ({ settings, status, busy, patchSettings, run, refresh })))
   const i = t(settings?.language || 'ru')
+  const linux = status?.os === 'linux'
   if (!settings) return <div className="empty"><h3>{i.settings}</h3><p>Служба приложения недоступна.</p></div>
   const s = settings
   const num = (k: keyof typeof s, v: string) => patchSettings({ [k]: Number(v) || 0 } as never)
@@ -122,7 +123,7 @@ export function Settings() {
             { value: 'panic', label: 'Экстренное отключение' },
           ]} />
         </div>
-        <Row label="Защита системного прокси при сбое" hint="Блокирует приложения, использующие прокси Windows. Прямые соединения других приложений не блокируются.">
+        <Row label="Защита системного прокси при сбое" hint={linux ? 'При падении ядра оставляет прокси на закрытый порт. Программы, которые сами не пользуются прокси, продолжают ходить напрямую.' : 'Блокирует приложения, использующие прокси Windows. Прямые соединения других приложений не блокируются.'}>
           <button className={'toggle' + ((s.deadManSwitch ?? true) ? ' on' : '')} onClick={() => patchSettings({ deadManSwitch: !(s.deadManSwitch ?? true) })} />
         </Row>
         <Row label="Smart Direct" hint="Запоминает прямые маршруты к российским доменам. Автообучение при включённой защите отключено.">
@@ -205,7 +206,7 @@ export function Settings() {
           </Row>
           <div className="field"><label>Стек</label>
             <MenuSelect label="Стек" value={s.tunStack} onChange={(value) => patchSettings({ tunStack: value })} options={[
-              { value: 'mixed', label: 'Смешанный — рекомендуется для Windows' },
+              { value: 'mixed', label: linux ? 'Смешанный — рекомендуется' : 'Смешанный — рекомендуется для Windows' },
               { value: 'system', label: 'Системный' },
               { value: 'gvisor', label: 'Изолированный' },
             ]} />
@@ -291,10 +292,10 @@ export function Settings() {
         </div>
         <div className="card">
           <h2>Система</h2>
-          <Row label={i.sysProxy} hint="Для приложений, которые не используют туннель. При включённом туннеле системный прокси следует отключить.">
+          <Row label={i.sysProxy} hint={linux ? 'Можно включить вместе с туннелем. Прокси читают программы на GTK, туннель забирает остальной трафик.' : 'Можно включить вместе с туннелем. Прокси нужен программам, которые не идут в сетевой адаптер.'}>
             <button className={'toggle' + (s.systemProxy ? ' on' : '')} onClick={() => run(async () => { await api.sysproxy(!s.systemProxy); await refresh() })} />
           </Row>
-          <Row label="Автозапуск Windows"><button className={'toggle' + (s.autoStart ? ' on' : '')} onClick={() => patchSettings({ autoStart: !s.autoStart })} /></Row>
+          <Row label={linux ? 'Автозапуск' : 'Автозапуск Windows'} hint={linux ? 'На Hyprland строка добавляется в автозапуск. На других средах — в автозапуск сессии.' : undefined}><button className={'toggle' + (s.autoStart ? ' on' : '')} onClick={() => patchSettings({ autoStart: !s.autoStart })} /></Row>
           <Row label="Закрывать в область уведомлений"><button className={'toggle' + (s.closeToTray ? ' on' : '')} onClick={() => patchSettings({ closeToTray: !s.closeToTray })} /></Row>
           <Row label="Запускать свёрнутым"><button className={'toggle' + (s.startHidden ? ' on' : '')} onClick={() => patchSettings({ startHidden: !s.startHidden })} /></Row>
           <div className="field"><label>Адрес проверки задержки</label><input value={s.latencyUrl} onChange={(e) => patchSettings({ latencyUrl: e.target.value })} /></div>

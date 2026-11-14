@@ -31,8 +31,14 @@ pub fn merge(profile_yaml: &str, prepared: &AppSettings, secret: &str) -> Result
     };
     set(map, "find-process-mode", s(find));
     let fp = if prepared.random_fingerprint { "random" } else if prepared.global_client_fingerprint.trim().is_empty() { "chrome" } else { prepared.global_client_fingerprint.as_str() };
-    set(map, "global-client-fingerprint", s(fp));
-    set(map, "global-ua", s("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"));
+    remove(map, &["global-client-fingerprint"]);
+    apply_client_fingerprint(map, fp);
+    let ua = if cfg!(windows) {
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    } else {
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    };
+    set(map, "global-ua", s(ua));
     let mut profile = Mapping::new();
     profile.insert(s("store-selected"), Value::Bool(prepared.store_selected));
     profile.insert(s("store-fake-ip"), Value::Bool(true));
@@ -59,6 +65,7 @@ pub fn merge(profile_yaml: &str, prepared: &AppSettings, secret: &str) -> Result
     let mtu = if prepared.mtu > 0 { prepared.mtu } else { 1400 };
     let mut tun = Mapping::new();
     tun.insert(s("enable"), Value::Bool(prepared.tun_enabled));
+    tun.insert(s("device"), s("jester"));
     tun.insert(s("stack"), s(if prepared.tun_stack.trim().is_empty() { "mixed" } else { &prepared.tun_stack }));
     tun.insert(s("auto-route"), Value::Bool(prepared.auto_route));
     tun.insert(s("auto-detect-interface"), Value::Bool(prepared.auto_detect_interface));
@@ -67,7 +74,8 @@ pub fn merge(profile_yaml: &str, prepared: &AppSettings, secret: &str) -> Result
     tun.insert(s("mtu"), num(mtu as i64));
     tun.insert(s("endpoint-independent-nat"), Value::Bool(prepared.endpoint_independent_nat));
     tun.insert(s("dns-hijack"), if prepared.dns_hijack { seq_str(&["any:53", "tcp://any:53"]) } else { Value::Sequence(vec![]) });
-    tun.insert(s("inet4-address"), seq_str(&[&prepared.inet4_address]));
+    let inet4 = tun_ipv4(prepared);
+    tun.insert(s("inet4-address"), seq_str(&[&inet4]));
     tun.insert(s("udp-timeout"), num(30));
     set(map, "tun", Value::Mapping(tun));
     if prepared.dns.enable {
@@ -296,6 +304,39 @@ fn wrap_dns(server: &str, via: bool) -> String {
     if lower.starts_with("https://") || lower.starts_with("tls://") || lower.starts_with("quic://") {
         format!("{server}#PROXY")
     } else { server.to_string() }
+}
+
+fn tun_ipv4(prepared: &AppSettings) -> String {
+    let configured = prepared.inet4_address.trim();
+    let configured = if configured.is_empty() { "172.19.0.1/30" } else { configured };
+    #[cfg(unix)]
+    if ipv4_taken(configured) { return "172.31.0.1/30".into(); }
+    configured.to_string()
+}
+
+#[cfg(unix)]
+fn ipv4_taken(cidr: &str) -> bool {
+    let ip = cidr.split('/').next().unwrap_or("").trim();
+    if ip.is_empty() { return false; }
+    let Ok(out) = std::process::Command::new("ip").args(["-4", "-o", "addr"]).output() else { return false };
+    let prefix = format!("{ip}/");
+    String::from_utf8_lossy(&out.stdout).split_whitespace().any(|part| part == ip || part.starts_with(&prefix))
+}
+
+fn apply_client_fingerprint(doc: &mut Mapping, fp: &str) {
+    let Some(list) = proxies_mut(doc) else { return };
+    for item in list {
+        let Some(proxy) = item.as_mapping_mut() else { continue };
+        let kind = proxy.get("type").and_then(Value::as_str).unwrap_or("").to_ascii_lowercase();
+        if !matches!(kind.as_str(), "vless" | "vmess" | "trojan") { continue; }
+        if proxy.keys().any(|k| k.as_str().map(|s| s.eq_ignore_ascii_case("client-fingerprint")).unwrap_or(false)) { continue; }
+        proxy.insert(s("client-fingerprint"), s(fp));
+    }
+}
+
+fn proxies_mut(doc: &mut Mapping) -> Option<&mut Vec<Value>> {
+    let key = doc.keys().find(|k| k.as_str().map(|s| s.eq_ignore_ascii_case("proxies")).unwrap_or(false))?.clone();
+    doc.get_mut(&key)?.as_sequence_mut()
 }
 
 fn is_fast(item: &Value) -> bool {

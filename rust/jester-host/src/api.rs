@@ -121,7 +121,7 @@ fn handle(app: &AppState, method: &Method, path: &str, query: &str, body: &Value
         "POST /api/profiles/update-all" => {
             let (updated, failed, errors) = profiles::update_all();
             app.settings.patch(|s| s.last_subscription_update_at = Some(chrono::Utc::now().to_rfc3339()))?;
-            if app.core.running() && updated > 0 { let _ = app.core.restart(&app.settings.current()); }
+            if app.core.running() && updated > 0 { let _ = app.core.restart(&app.settings); }
             Ok(json!({"updated": updated, "failed": failed, "errors": errors}))
         }
         "GET /api/app/update" => Ok(check_update()),
@@ -153,9 +153,9 @@ fn handle(app: &AppState, method: &Method, path: &str, query: &str, body: &Value
         "POST /api/guardian/warm" => { warm(app); Ok(json!({"ok": true})) }
         "POST /api/guardian/learn-direct" => learn_direct(app),
         "GET /api/logs" => Ok(json!({"text": app.core.log_tail(250)})),
-        "POST /api/core/start" => Ok(serde_json::to_value(app.core.start(&app.settings.current())?).unwrap()),
+        "POST /api/core/start" => Ok(serde_json::to_value(app.core.start(&app.settings)?).unwrap()),
         "POST /api/core/stop" => { app.core.stop(); Ok(serde_json::to_value(app.core.status(&app.settings.current())).unwrap()) }
-        "POST /api/core/restart" => Ok(serde_json::to_value(app.core.restart(&app.settings.current())?).unwrap()),
+        "POST /api/core/restart" => Ok(serde_json::to_value(app.core.restart(&app.settings)?).unwrap()),
         "POST /api/core/download" => {
             let channel = app.settings.current().core_channel;
             app.core.downloader.install(&channel)?;
@@ -176,10 +176,8 @@ fn handle(app: &AppState, method: &Method, path: &str, query: &str, body: &Value
         "POST /api/sysproxy" => {
             let enable = body.get("enable").and_then(|v| v.as_bool()).unwrap_or(false);
             if enable {
-                let restart = app.core.running() && app.settings.current().tun_enabled;
-                app.settings.patch(|s| { s.system_proxy = true; s.tun_enabled = false; })?;
-                if restart { app.core.restart(&app.settings.current())?; }
-                else { sysproxy::set(true, app.settings.current().mixed_port)?; }
+                app.settings.patch(|s| s.system_proxy = true)?;
+                sysproxy::set(true, app.settings.current().mixed_port)?;
             } else {
                 sysproxy::set(false, 0)?;
                 app.settings.patch(|s| s.system_proxy = false)?;
@@ -207,7 +205,7 @@ fn handle(app: &AppState, method: &Method, path: &str, query: &str, body: &Value
             let external = body.get("externalPort").and_then(|v| v.as_i64()).unwrap_or(cur.external_port as i64) as i32;
             let running = app.core.running();
             app.settings.patch(|s| { s.mixed_port = mixed; s.socks_port = socks; s.external_port = external; })?;
-            if running { app.core.restart(&app.settings.current())?; }
+            if running { app.core.restart(&app.settings)?; }
             Ok(serde_json::to_value(app.settings.current()).unwrap())
         }
         "POST /api/window/minimize" => { send(app, "minimize"); Ok(json!({"ok": true})) }
@@ -229,14 +227,14 @@ fn profile_routes(app: &AppState, method: &Method, path: &str, body: &Value) -> 
         if let Some(id) = rest.strip_suffix("/activate") {
         if profiles::get(id).is_none() { return Err("not found".into()); }
         app.settings.patch(|s| s.active_profile_id = id.to_string())?;
-        if app.core.running() { let _ = app.core.restart(&app.settings.current()); }
+        if app.core.running() { let _ = app.core.restart(&app.settings); }
         return Ok(serde_json::to_value(app.settings.current()).unwrap());
         }
     }
     if method == Method::POST {
         if let Some(id) = rest.strip_suffix("/update") {
         let updated = profiles::update_subscription(id)?;
-        if app.core.running() && app.settings.current().active_profile_id == id { let _ = app.core.restart(&app.settings.current()); }
+        if app.core.running() && app.settings.current().active_profile_id == id { let _ = app.core.restart(&app.settings); }
         return Ok(serde_json::to_value(updated).unwrap());
         }
     }
@@ -306,7 +304,7 @@ fn rush(app: &AppState) -> Result<Value, String> {
     if !crate::paths::mihomo_exe().exists() || app.settings.current().active_profile_id.is_empty() {
         return Ok(json!({"enabled": true, "message": "Ускоренный канал включён. Загрузите ядро, выберите профиль и запустите подключение."}));
     }
-    if app.core.running() { app.core.restart(&app.settings.current())?; } else {
+    if app.core.running() { app.core.restart(&app.settings)?; } else {
         return Ok(json!({"enabled": true, "message": "Ускоренный канал включён. Запустите ядро."}));
     }
     let s = app.settings.current();
@@ -354,7 +352,7 @@ fn learn_proxy(app: &AppState) -> Result<Value, String> {
         s.custom_proxy_rules = set.join("\n");
     })?;
     let _ = rules::ensure(&app.settings.current());
-    if app.core.running() { let _ = app.core.restart(&app.settings.current()); }
+    if app.core.running() { let _ = app.core.restart(&app.settings); }
     Ok(json!({"ok": true, "added": added.len(), "domains": added, "message": format!("Сохранено доменов: {}.", added.len())}))
 }
 
@@ -391,7 +389,7 @@ fn learn_direct(app: &AppState) -> Result<Value, String> {
         }
     })?;
     let _ = rules::ensure(&app.settings.current());
-    if app.core.running() && !added.is_empty() { let _ = app.core.restart(&app.settings.current()); }
+    if app.core.running() && !added.is_empty() { let _ = app.core.restart(&app.settings); }
     Ok(json!({"ok": true, "message": format!("Добавлено в Smart Direct: {}", added.len()), "domains": added}))
 }
 
@@ -490,7 +488,10 @@ fn elevate() -> bool {
         return code.0 as isize > 32;
     }
     #[cfg(not(windows))]
-    { false }
+    {
+        let _ = exe;
+        false
+    }
 }
 
 async fn clash(State(app): State<Arc<AppState>>, req: Request<Body>) -> Response {
@@ -580,7 +581,7 @@ pub fn guardian(app: Arc<AppState>) {
                 }
             }
             if restart && app.core.running() {
-                let _ = app.core.restart(&app.settings.current());
+                let _ = app.core.restart(&app.settings);
                 continue;
             }
             let s = app.settings.current();

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub const APP_PORT: u16 = 37841;
-pub const APP_VERSION: &str = "1.0.0";
+pub const APP_VERSION: &str = "1.1.0";
 
 fn t() -> bool { true }
 
@@ -359,4 +359,6 @@ pub struct CoreStatus {
     pub download_progress: i32,
     pub active_profile_id: String,
     pub mode: String,
+    pub os: String,
+    pub tun_up: bool,
 }

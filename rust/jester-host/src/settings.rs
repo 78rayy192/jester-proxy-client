@@ -156,6 +156,14 @@ fn upgrade_legacy(a: &mut AppearanceSettings) {
 }
 
 fn apply_autostart(enable: bool) {
+    #[cfg(windows)]
+    apply_autostart_windows(enable);
+    #[cfg(not(windows))]
+    apply_autostart_linux(enable);
+}
+
+#[cfg(windows)]
+fn apply_autostart_windows(enable: bool) {
     let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
     let Ok(key) = hkcu.open_subkey_with_flags(
         r"Software\Microsoft\Windows\CurrentVersion\Run",
@@ -169,4 +177,73 @@ fn apply_autostart(enable: bool) {
     } else {
         let _ = key.delete_value(NAME);
     }
+}
+
+#[cfg(not(windows))]
+fn apply_autostart_linux(enable: bool) {
+    let Ok(exe) = std::env::current_exe() else { return };
+    write_desktop_entry(enable, &exe);
+    write_hypr_autostart(enable, &exe);
+}
+
+#[cfg(not(windows))]
+fn write_desktop_entry(enable: bool, exe: &std::path::Path) {
+    let Some(home) = std::env::var_os("HOME") else { return };
+    let dir = std::path::PathBuf::from(home).join(".config").join("autostart");
+    let path = dir.join("jester.desktop");
+    if !enable {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let body = format!(
+        "[Desktop Entry]\nType=Application\nName=Jester\nComment=Jester proxy client\nExec=\"{}\"\nTerminal=false\nCategories=Network;\nStartupNotify=false\nX-GNOME-Autostart-enabled=true\n",
+        exe.display()
+    );
+    let _ = std::fs::write(path, body);
+}
+
+#[cfg(not(windows))]
+fn write_hypr_autostart(enable: bool, exe: &std::path::Path) {
+    let Some(home) = std::env::var_os("HOME") else { return };
+    let path = std::path::PathBuf::from(home).join(".config").join("hypr").join("modules").join("autostart.lua");
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    if !text.contains("hl.exec_cmd") { return; }
+    let cleaned = strip_hypr_block(&text);
+    let next = if enable {
+        let block = format!("    -- jester-autostart: managed by Jester, do not edit\n    hl.exec_cmd([[{}]])\n", exe.display());
+        insert_before_last_end(&cleaned, &block)
+    } else {
+        cleaned
+    };
+    if next != text { let _ = std::fs::write(path, next); }
+}
+
+#[cfg(not(windows))]
+fn strip_hypr_block(text: &str) -> String {
+    let mut out = String::new();
+    let mut skip_exec = false;
+    for line in text.lines() {
+        if line.contains("jester-autostart:") {
+            skip_exec = true;
+            continue;
+        }
+        if skip_exec {
+            skip_exec = false;
+            if line.contains("hl.exec_cmd") { continue; }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+#[cfg(not(windows))]
+fn insert_before_last_end(text: &str, block: &str) -> String {
+    let Some(idx) = text.rfind("\nend)") else { return format!("{text}{block}"); };
+    let mut next = String::with_capacity(text.len() + block.len());
+    next.push_str(&text[..idx + 1]);
+    next.push_str(block);
+    next.push_str(&text[idx + 1..]);
+    next
 }

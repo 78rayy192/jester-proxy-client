@@ -5,8 +5,8 @@ use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::os::windows::process::CommandExt;
 
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub struct Core {
@@ -14,6 +14,7 @@ pub struct Core {
     child: Mutex<Option<Child>>,
     stopping: AtomicBool,
     restarts: AtomicU32,
+    tun_up: AtomicBool,
     pub downloader: crate::download::Downloader,
     log: Mutex<Vec<String>>,
 }
@@ -27,6 +28,7 @@ impl Core {
             child: Mutex::new(None),
             stopping: AtomicBool::new(false),
             restarts: AtomicU32::new(0),
+            tun_up: AtomicBool::new(false),
             downloader: crate::download::Downloader::new(),
             log: Mutex::new(Vec::new()),
         }
@@ -49,75 +51,119 @@ impl Core {
         CoreStatus {
             running,
             core_installed: paths::mihomo_exe().exists(),
-            wintun_installed: paths::wintun_dll().exists(),
+            wintun_installed: if cfg!(windows) { paths::wintun_dll().exists() } else { true },
             is_admin: paths::is_admin(),
-            needs_admin: settings.tun_enabled && !paths::is_admin(),
+            needs_admin: cfg!(windows) && settings.tun_enabled && !paths::is_admin() && !paths::can_elevate(),
+            os: std::env::consts::OS.into(),
             pid: if running { self.pid() } else { 0 },
             version: read_version(),
             app_version: APP_VERSION.into(),
-            message: if self.downloader.busy() { self.downloader.stage() } else if running { "online".into() } else { "idle".into() },
+            tun_up: running && self.tun_up.load(Ordering::Relaxed),
+            message: if self.downloader.busy() { self.downloader.stage() }
+                else if running && settings.tun_enabled && !self.tun_up.load(Ordering::Relaxed) { "Туннель не поднялся: нет права создать сетевой адаптер. Прокси работает.".into() }
+                else if running { "online".into() } else { "idle".into() },
             download_progress: self.downloader.progress(),
             active_profile_id: settings.active_profile_id.clone(),
             mode: settings.mode.clone(),
         }
     }
 
-    pub fn start(&self, settings: &AppSettings) -> Result<CoreStatus, String> {
+    pub fn start(&self, store: &crate::settings::Store) -> Result<CoreStatus, String> {
+        let settings = store.current();
         if !paths::mihomo_exe().exists() { return Err("Ядро не установлено.".into()); }
         if settings.active_profile_id.trim().is_empty() { return Err("Сначала выберите профиль.".into()); }
-        if settings.tun_enabled && !paths::is_admin() {
-            let mut status = self.status(settings);
+        #[cfg(windows)]
+        if settings.tun_enabled && !paths::is_admin() && !paths::can_elevate() {
+            let mut status = self.status(&settings);
             status.message = "admin-required".into();
             status.needs_admin = true;
             return Ok(status);
         }
         let profile = profiles::get(&settings.active_profile_id).ok_or("Активный профиль не найден")?;
         let yaml = std::fs::read_to_string(profiles::config_path(&profile.id)?).map_err(|e| e.to_string())?;
-        let _ = rules::ensure(settings);
-        let effective = persona::prepare_profile(settings, Some(&profile));
+        let _ = rules::ensure(&settings);
+        let effective = persona::prepare_profile(&settings, Some(&profile));
         let _ = rules::ensure(&effective);
         let merged = config::merge(&yaml, &effective, &self.secret)?;
         paths::ensure();
         std::fs::write(paths::runtime_config(), merged).map_err(|e| e.to_string())?;
+        self.stopping.store(true, Ordering::Relaxed);
         self.stop_inner();
+        self.stopping.store(false, Ordering::Relaxed);
+        #[cfg(unix)]
+        reap_our_cores();
+        #[cfg(windows)]
         copy_wintun();
-        let mut cmd = Command::new(paths::mihomo_exe());
+        #[cfg(unix)]
+        if settings.tun_enabled { grant_tun_capability(); }
+        let mut cmd = core_command();
         cmd.current_dir(paths::run())
             .arg("-d").arg(paths::run())
             .arg("-f").arg(paths::runtime_config())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env("DISABLE_LOOPBACK_DETECTOR", "1")
-            .creation_flags(CREATE_NO_WINDOW);
+            .stderr(Stdio::piped());
+        hide_console(&mut cmd);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                    if libc::getppid() == 1 { libc::raise(libc::SIGTERM); }
+                    Ok(())
+                });
+            }
+        }
         let mut child = cmd.spawn().map_err(|e| format!("Не удалось запустить ядро: {e}"))?;
         if settings.high_priority { raise_priority(&child); }
         if let Some(out) = child.stdout.take() { pipe_log(out, self); }
         if let Some(err) = child.stderr.take() { pipe_log(err, self); }
         *self.child.lock().expect("child") = Some(child);
-        if let Err(e) = wait_ready(settings.external_port, &self.secret) {
-            self.stop_inner();
-            return Err(e);
+        let mut ready = false;
+        let mut died = false;
+        for _ in 0..40 {
+            if !self.running() { died = true; break; }
+            if core_ready(settings.external_port, &self.secret) { ready = true; break; }
+            std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        if settings.system_proxy && !settings.tun_enabled {
+        if !ready {
+            if died { std::thread::sleep(std::time::Duration::from_millis(200)); }
+            let detail = self.log_tail(12);
+            self.stopping.store(true, Ordering::Relaxed);
+            self.stop_inner();
+            self.stopping.store(false, Ordering::Relaxed);
+            if died {
+                let line = detail.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("");
+                if !line.is_empty() { return Err(line.to_string()); }
+                return Err("Ядро остановилось при запуске.".into());
+            }
+            return Err("Ядро не ответило на локальный API.".into());
+        }
+        self.note_tun(&settings);
+        if settings.system_proxy {
             let _ = sysproxy::set(true, settings.mixed_port);
-        } else if !settings.dead_man_armed {
+        } else {
             let _ = sysproxy::set(false, 0);
+        }
+        if settings.dead_man_armed {
+            let _ = store.patch(|s| s.dead_man_armed = false);
         }
         self.restarts.store(0, Ordering::Relaxed);
         self.append("core started");
-        Ok(self.status(settings))
+        Ok(self.status(&store.current()))
     }
 
     pub fn stop(&self) {
         self.stopping.store(true, Ordering::Relaxed);
         self.stop_inner();
         self.stopping.store(false, Ordering::Relaxed);
+        self.tun_up.store(false, Ordering::Relaxed);
         let _ = sysproxy::set(false, 0);
         self.append("core stopped");
     }
 
-    pub fn restart(&self, settings: &AppSettings) -> Result<CoreStatus, String> {
+    pub fn restart(&self, settings: &crate::settings::Store) -> Result<CoreStatus, String> {
         self.stopping.store(true, Ordering::Relaxed);
         self.stop_inner();
         self.stopping.store(false, Ordering::Relaxed);
@@ -208,30 +254,122 @@ fn pipe_log(pipe: impl std::io::Read + Send + 'static, core: &Core) {
     });
 }
 
-fn wait_ready(port: i32, secret: &str) -> Result<(), String> {
-    let client = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_millis(800)).build().map_err(|e| e.to_string())?;
-    for _ in 0..25 {
-        if let Ok(res) = client.get(format!("http://127.0.0.1:{port}/version")).header("Authorization", format!("Bearer {secret}")).send() {
-            if res.status().is_success() { return Ok(()); }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-    Err("Ядро не ответило на локальный API.".into())
+fn tun_listener_up(port: i32, secret: &str) -> bool {
+    let Ok(client) = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_millis(400)).build() else { return false };
+    let Ok(res) = client.get(format!("http://127.0.0.1:{port}/configs"))
+        .header("Authorization", format!("Bearer {secret}"))
+        .send() else { return false };
+    let Ok(doc) = res.json::<serde_json::Value>() else { return false };
+    doc.get("tun").and_then(|tun| tun.get("enable")).and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+fn core_ready(port: i32, secret: &str) -> bool {
+    let Ok(client) = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_millis(400)).build() else { return false };
+    client.get(format!("http://127.0.0.1:{port}/version"))
+        .header("Authorization", format!("Bearer {secret}"))
+        .send()
+        .map(|res| res.status().is_success())
+        .unwrap_or(false)
 }
 
 fn read_version() -> String {
     if !paths::mihomo_exe().exists() { return String::new(); }
-    let output = Command::new(paths::mihomo_exe()).arg("-v").creation_flags(CREATE_NO_WINDOW).output();
+    let mut cmd = Command::new(paths::mihomo_exe());
+    cmd.arg("-v");
+    hide_console(&mut cmd);
+    let output = cmd.output();
     output.ok().map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").trim().to_string()).unwrap_or_default()
 }
 
 fn raise_priority(child: &Child) {
-    use std::os::windows::io::AsRawHandle;
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::System::Threading::{SetPriorityClass, ABOVE_NORMAL_PRIORITY_CLASS};
-    unsafe { let _ = SetPriorityClass(HANDLE(child.as_raw_handle()), ABOVE_NORMAL_PRIORITY_CLASS); }
+    #[cfg(windows)]
+    unsafe {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::Threading::{SetPriorityClass, ABOVE_NORMAL_PRIORITY_CLASS};
+        let _ = SetPriorityClass(HANDLE(child.as_raw_handle()), ABOVE_NORMAL_PRIORITY_CLASS);
+    }
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::setpriority(libc::PRIO_PROCESS, child.id() as libc::id_t, -5);
+    }
 }
 
+impl Core {
+    fn note_tun(&self, settings: &AppSettings) {
+        if !settings.tun_enabled {
+            self.tun_up.store(false, Ordering::Relaxed);
+            return;
+        }
+        let up = (0..6).any(|_| {
+            if tun_listener_up(settings.external_port, &self.secret) { return true; }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            false
+        });
+        let log = self.log_tail(40);
+        let failed = log.contains("Start TUN listening error") || log.contains("operation not permitted");
+        self.tun_up.store(up && !failed, Ordering::Relaxed);
+    }
+}
+
+#[cfg(unix)]
+fn grant_tun_capability() {
+    let exe = paths::mihomo_exe();
+    if tun_capability_present(&exe) { return; }
+    let _ = Command::new("sudo")
+        .args(["-n", "setcap", "cap_net_admin,cap_net_bind_service+ep"])
+        .arg(&exe)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(unix)]
+fn tun_capability_present(path: &std::path::Path) -> bool {
+    let Ok(out) = Command::new("getcap").arg(path).output() else { return false };
+    String::from_utf8_lossy(&out.stdout).contains("cap_net_admin")
+}
+
+#[cfg(unix)]
+fn reap_our_cores() {
+    let marker = paths::run().display().to_string();
+    let Ok(entries) = std::fs::read_dir("/proc") else { return };
+    let mut pids = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else { continue };
+        if pid <= 0 { continue; }
+        let Ok(cmd) = std::fs::read(format!("/proc/{pid}/cmdline")) else { continue };
+        let text = String::from_utf8_lossy(&cmd);
+        if text.contains("mihomo") && text.contains(&marker) {
+            unsafe { libc::kill(pid, libc::SIGTERM); }
+            pids.push(pid);
+        }
+    }
+    for _ in 0..20 {
+        let alive = pids.iter().any(|pid| unsafe { libc::kill(*pid, 0) } == 0);
+        if !alive { break; }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+fn core_command() -> Command {
+    let mut cmd = Command::new(paths::mihomo_exe());
+    cmd.env("DISABLE_LOOPBACK_DETECTOR", "1");
+    cmd
+}
+
+fn hide_console(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    { let _ = cmd; }
+}
+
+#[cfg(windows)]
 fn copy_wintun() {
     let src = paths::wintun_dll();
     let dst = paths::run().join("wintun.dll");
@@ -268,7 +406,7 @@ pub fn watch_exit(core: Arc<Core>, settings: Arc<crate::settings::Store>) {
         let n = core.note_restart();
         if n > 3 { core.append("auto-restart aborted after 3 attempts"); continue; }
         std::thread::sleep(std::time::Duration::from_millis(1500 * n as u64));
-        match core.start(&settings.current()) {
+        match core.start(&settings) {
             Ok(_) => { core.append("auto-restart succeeded"); let _ = settings.patch(|s| s.dead_man_armed = false); }
             Err(e) => core.append(&format!("auto-restart failed: {e}")),
         }

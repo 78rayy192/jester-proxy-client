@@ -27,8 +27,9 @@ impl Downloader {
             let zip_path = paths::cores().join("mihomo.zip");
             self.set_stage("core");
             download_file(&url, &zip_path, &self.progress)?;
-            extract_exe(&zip_path, &paths::mihomo_exe())?;
+            extract_core(&zip_path, &paths::mihomo_exe())?;
             let _ = std::fs::remove_file(&zip_path);
+            #[cfg(windows)]
             if !paths::wintun_dll().exists() {
                 self.set_stage("wintun");
                 install_wintun()?;
@@ -45,32 +46,55 @@ impl Downloader {
     fn set_stage(&self, stage: &str) { *self.stage.lock().expect("stage") = stage.into(); }
 }
 
+fn os_name() -> &'static str {
+    if cfg!(windows) { "windows" } else { "linux" }
+}
+
+fn arch_name() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    }
+}
+
+fn core_archive(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    if n.contains("-go12") { return false; }
+    #[cfg(windows)]
+    { n.ends_with(".zip") }
+    #[cfg(not(windows))]
+    { n.ends_with(".gz") && !n.ends_with(".tar.gz") }
+}
+
 fn resolve(channel: &str) -> Result<String, String> {
     let client = reqwest::blocking::Client::builder().user_agent("JesterProxyClient/0.2").timeout(std::time::Duration::from_secs(40)).build().map_err(|e| e.to_string())?;
     let doc: serde_json::Value = client.get("https://api.github.com/repos/MetaCubeX/mihomo/releases/latest").send().map_err(|e| e.to_string())?.error_for_status().map_err(|e| e.to_string())?.json().map_err(|e| e.to_string())?;
-    let arch = "amd64";
+    let arch = arch_name();
+    let os = os_name();
     let mut best = None;
     let mut fallback = None;
     for asset in doc.get("assets").and_then(|a| a.as_array()).ok_or("Нет ассетов релиза")? {
         let name = asset.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let url = asset.get("browser_download_url").and_then(|v| v.as_str()).unwrap_or("");
-        if !name.to_ascii_lowercase().ends_with(".zip") || name.to_ascii_lowercase().contains("-go12") { continue; }
-        if !name.to_ascii_lowercase().starts_with(&format!("mihomo-windows-{arch}")) { continue; }
-        if matches!(channel, "v3" | "amd64-v3") && name.to_ascii_lowercase().contains(&format!("windows-{arch}-v3-")) { return Ok(url.into()); }
-        if channel == "compatible" && name.to_ascii_lowercase().contains(&format!("windows-{arch}-compatible-")) { return Ok(url.into()); }
-        if baseline(name, arch) { best = Some(url.to_string()); fallback = Some(url.to_string()); }
-        if name.to_ascii_lowercase().contains(&format!("windows-{arch}-compatible-")) && fallback.is_none() { fallback = Some(url.to_string()); }
+        if !core_archive(name) { continue; }
+        if !name.to_ascii_lowercase().starts_with(&format!("mihomo-{os}-{arch}")) { continue; }
+        if matches!(channel, "v3" | "amd64-v3") && name.to_ascii_lowercase().contains(&format!("{os}-{arch}-v3-")) { return Ok(url.into()); }
+        if channel == "compatible" && name.to_ascii_lowercase().contains(&format!("{os}-{arch}-compatible-")) { return Ok(url.into()); }
+        if baseline(name, os, arch) { best = Some(url.to_string()); fallback = Some(url.to_string()); }
+        if name.to_ascii_lowercase().contains(&format!("{os}-{arch}-compatible-")) && fallback.is_none() { fallback = Some(url.to_string()); }
     }
     best.or(fallback).ok_or_else(|| "Не найден пакет mihomo для этой архитектуры.".into())
 }
 
-fn baseline(name: &str, arch: &str) -> bool {
-    let prefix = format!("mihomo-windows-{arch}-v");
+fn baseline(name: &str, os: &str, arch: &str) -> bool {
+    let prefix = format!("mihomo-{os}-{arch}-v");
     let lower = name.to_ascii_lowercase();
     let Some(rest) = lower.strip_prefix(&prefix) else { return false };
     rest.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) && rest.contains('.')
 }
 
+#[cfg(windows)]
 fn install_wintun() -> Result<(), String> {
     let zip_path = paths::cores().join("wintun.zip");
     download_file("https://www.wintun.net/builds/wintun-0.14.1.zip", &zip_path, &std::sync::atomic::AtomicI32::new(0))?;
@@ -111,18 +135,77 @@ fn download_file(url: &str, dest: &std::path::Path, progress: &std::sync::atomic
     std::fs::rename(&tmp, dest).map_err(|e| e.to_string())
 }
 
-fn extract_exe(zip_path: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
-    let file = std::fs::File::open(zip_path).map_err(|e| e.to_string())?;
+fn extract_core(archive: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+    let mut head = [0u8; 4];
+    {
+        let mut file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
+        use std::io::Read;
+        let _ = file.read(&mut head).map_err(|e| e.to_string())?;
+    }
+    let gzip = head[0] == 0x1f && head[1] == 0x8b;
+    let bytes = if gzip { read_gz(archive)? } else { read_zip(archive)? };
+    if !valid_core(&bytes) {
+        return Err(if cfg!(windows) {
+            "В архиве нет корректного исполняемого файла Windows.".into()
+        } else {
+            "В архиве нет корректного исполняемого файла Linux.".into()
+        });
+    }
+    std::fs::write(dest, &bytes).map_err(|e| e.to_string())?;
+    mark_executable(dest)
+}
+
+fn read_gz(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    #[cfg(unix)]
+    {
+        let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        let mut dec = flate2::read::GzDecoder::new(file);
+        let mut bytes = Vec::new();
+        dec.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        return Ok(bytes);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err("Сжатый gz-пакет ядра поддерживается на Linux.".into())
+    }
+}
+
+fn read_zip(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
     let mut idx = None;
     for i in 0..zip.len() {
         let name = zip.by_index(i).map(|e| e.name().to_string()).unwrap_or_default();
-        if name.to_ascii_lowercase().ends_with(".exe") { idx = Some(i); break; }
+        let lower = name.to_ascii_lowercase();
+        if lower.ends_with('/') { continue; }
+        if cfg!(windows) && lower.ends_with(".exe") { idx = Some(i); break; }
+        if !cfg!(windows) && !lower.contains('/') { idx = Some(i); }
     }
-    let idx = idx.ok_or("В архиве нет exe ядра.")?;
+    let idx = idx.ok_or("В архиве нет файла ядра.")?;
     let mut entry = zip.by_index(idx).map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
     entry.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    if bytes.len() < 64 || bytes[0] != b'M' || bytes[1] != b'Z' { return Err("В архиве нет корректного исполняемого файла Windows.".into()); }
-    std::fs::write(dest, bytes).map_err(|e| e.to_string())
+    Ok(bytes)
+}
+
+fn valid_core(bytes: &[u8]) -> bool {
+    if bytes.len() < 64 { return false; }
+    #[cfg(windows)]
+    { bytes[0] == b'M' && bytes[1] == b'Z' }
+    #[cfg(not(windows))]
+    { bytes[0] == 0x7f && bytes[1] == b'E' && bytes[2] == b'L' && bytes[3] == b'F' }
+}
+
+fn mark_executable(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path).map_err(|e| e.to_string())?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    { let _ = path; }
+    Ok(())
 }

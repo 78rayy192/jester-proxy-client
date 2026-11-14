@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-$version = if ($args[0] -and $args[0] -notlike "-*") { $args[0] } else { "v1.0.0" }
+$version = if ($args[0] -and $args[0] -notlike "-*") { $args[0] } else { "v1.1.0" }
 $outDir = Join-Path $PSScriptRoot "release\Jester"
 $zipPath = Join-Path $PSScriptRoot "release\Jester-windows-x64.zip"
 $mingw = "C:\Users\PC-Admin\AppData\Local\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin"
@@ -39,8 +39,13 @@ Write-Host "Created $zipPath ($sizeMb MB)"
 if ($args -contains "-Release") {
   Write-Host "Creating GitHub release $version..."
   gh release create $version $zipPath --repo 78rayy192/jester-proxy-client --title "Jester $version" --notes @"
-Распакуйте **Jester-windows-x64.zip** и запустите ``Jester.exe``.
+Версия для Linux и обновление Windows.
 
-Windows 10 или 11, 64-bit. .NET ставить не нужно. Для туннеля подтвердите запрос прав администратора. При первом запуске нажмите «Загрузить ядро».
+- Туннель и системный прокси включаются одновременно.
+- Linux: отдельное окно, системный прокси и автозапуск. Запрос прав для туннеля убран.
+- Windows: для туннеля по-прежнему нужны права администратора.
+
+Linux: распакуйте **Jester-linux-x64.tar.gz** и запустите ``jester``. Нужен WebKitGTK.
+Windows: распакуйте **Jester-windows-x64.zip** и запустите ``Jester.exe``.
 "@
 }
