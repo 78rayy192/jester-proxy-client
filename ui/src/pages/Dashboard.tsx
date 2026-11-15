@@ -5,7 +5,7 @@ import { t } from '../lib/i18n'
 import { useApp } from '../store/app'
 import { PortSwap } from '../components/PortSwap'
 import { Sparkline } from '../components/Sparkline'
-import { EmptyState, Flag, formatExpire, formatQuota, routeLabel, splitServerName } from '../components/UiBits'
+import { EmptyState, Flag, formatExpire, formatQuota, quotaWarning, routeLabel, splitServerName } from '../components/UiBits'
 
 type GuardianState = { message: string; lane: string; rttMs: number; deadManArmed: boolean; exitIp?: string | null }
 
@@ -34,6 +34,9 @@ const TrafficCard = memo(function TrafficCard({ active, guardian, graph, languag
         <div className="sub-meta">
           <div>Подписка · {formatQuota((active.upload || 0) + (active.download || 0), active.total || 0)}</div>
           {formatExpire(active.expireUnix) && <div>До {formatExpire(active.expireUnix)}</div>}
+          {quotaWarning((active.upload || 0) + (active.download || 0), active.total || 0, active.expireUnix) && (
+            <div className="warn-text">{quotaWarning((active.upload || 0) + (active.download || 0), active.total || 0, active.expireUnix)}</div>
+          )}
           {active.hwidLimited && <div className="warn-text">Ограничение устройств у поставщика</div>}
         </div>
       )}
@@ -333,7 +336,7 @@ export function Dashboard() {
               <div className="grid cols-3" style={{ flex: 1, minWidth: 0 }}>
                 <div className="stat" style={{ fontSize: 16 }}>{leak.realIp || (leak.tunMode ? 'Туннель' : '—')}<small>Внешний адрес</small></div>
                 <div className="stat" style={{ fontSize: 16 }}>{leak.exitIp || '—'}<small>Адрес выхода</small></div>
-                <div className="stat" style={{ fontSize: 16 }}>{leak.masked ? 'Адреса различаются' : 'Не подтверждено'}<small title={leak.message}>{leak.message}</small></div>
+                <div className="stat" style={{ fontSize: 16 }}>{leak.masked ? 'Адреса различаются' : (leak.summary || 'Проверено')}<small title={leak.message}>{leak.message}</small></div>
               </div>
             </div>
             <p className="hint">Оценка проверок конфигурации: {score ?? '—'} / 100. Результат не подтверждает анонимность.</p>

@@ -26,6 +26,12 @@ export function AppearancePage() {
           <div className="field row"><label htmlFor="appearance-secondary">Второй акцент</label><input id="appearance-secondary" className="color" type="color" value={a.accentMuted} onChange={(e) => set({ accentMuted: e.target.value })} /></div>
           <div className="field row"><label htmlFor="appearance-background">Фон</label><input id="appearance-background" className="color" type="color" value={a.background} onChange={(e) => set({ background: e.target.value })} /></div>
           <div className="field row"><label htmlFor="appearance-text">Текст</label><input id="appearance-text" className="color" type="color" value={a.text} onChange={(e) => set({ text: e.target.value })} /></div>
+          <div className="field"><label>Тема</label>
+            <MenuSelect label="Тема" value={a.theme === 'system' ? 'system' : 'graphite'} onChange={(value) => set({ theme: value })} options={[
+              { value: 'graphite', label: 'Как задано' },
+              { value: 'system', label: 'Как в системе' },
+            ]} />
+          </div>
           <div className="field"><label>Стиль фона</label>
             <MenuSelect label="Стиль фона" value={a.backgroundStyle} onChange={(value) => set({ backgroundStyle: value })} options={[
               { value: 'mesh', label: 'Мягкий свет' },

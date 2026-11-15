@@ -215,7 +215,10 @@ export const api = {
   deleteProfile: (id: string) => req('/api/profiles/' + id, { method: 'DELETE' }),
   exportSettings: () => req<AppSettings>('/api/settings/export'),
   importSettings: (s: AppSettings) => req<AppSettings>('/api/settings/import', { method: 'POST', body: JSON.stringify(s) }),
-  checkUpdate: () => req<{ current: string; latest?: string; updateAvailable: boolean; releaseUrl?: string; downloadUrl?: string; message: string }>('/api/app/update'),
+  checkUpdate: () => req<{ current: string; latest?: string; updateAvailable: boolean; releaseUrl?: string; downloadUrl?: string; downloadName?: string; message: string }>('/api/app/update'),
+  downloadUpdate: () => req<{ ok: boolean; path?: string; message: string }>('/api/app/update/download', { method: 'POST' }, 180000),
+  notices: (after = 0) => req<{ items: { id: number; text: string; level: string }[] }>(`/api/notices?after=${after}`),
+  processes: () => req<{ names: string[] }>('/api/processes'),
   applyPreset: (name: 'speed' | 'stability' | 'protection') => req<AppSettings>('/api/presets/' + name, { method: 'POST' }),
   applyPersona: (name: 'auto' | 'home' | 'mobile' | 'corporate') => req<AppSettings>('/api/persona/' + name, { method: 'POST' }),
   guardian: () => req<{
@@ -271,6 +274,7 @@ export type LeakCheckResult = {
   running: boolean
   tunMode?: boolean
   score?: number
+  summary?: string
   message: string
   checks?: GhostCheck[]
 }

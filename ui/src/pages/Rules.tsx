@@ -98,7 +98,7 @@ export function Rules() {
 
         <div className="card">
           <h2>Пользовательские правила</h2>
-          <p className="hint">Один домен на строку.</p>
+          <p className="hint">Один домен на строку. Программа: строка <span className="mono">process:firefox</span> или <span className="mono">process:telegram.exe</span>.</p>
           <div className="field">
             <label>Через туннель</label>
             <textarea rows={6} placeholder={'youtube.com\ninstagram.com\ndiscord.com'} value={proxyText} onChange={(e) => setProxyText(e.target.value)} />

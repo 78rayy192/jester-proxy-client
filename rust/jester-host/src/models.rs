@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub const APP_PORT: u16 = 37841;
-pub const APP_VERSION: &str = "1.1.0";
+pub const APP_VERSION: &str = "1.2.0";
 
 fn t() -> bool { true }
 

@@ -68,7 +68,7 @@ fn len(path: &std::path::Path) -> i64 {
 }
 
 fn write_lines(name: &str, content: &str) -> Result<(), String> {
-    let text = content.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
+    let text = crate::logic::domain_lines(content).join("\n");
     let path = paths::rules_dir().join(name);
     std::fs::write(path, text).map_err(|e| e.to_string())
 }

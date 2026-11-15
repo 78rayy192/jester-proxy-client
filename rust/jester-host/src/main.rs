@@ -10,8 +10,10 @@ mod models;
 mod normalize;
 mod paths;
 mod persona;
+mod logic;
 mod profiles;
 mod rules;
+mod runtime;
 mod settings;
 mod sysproxy;
 
@@ -22,6 +24,7 @@ use std::time::{Duration, Instant};
 fn main() {
     set_app_id();
     paths::ensure();
+    settings::register_launcher();
     if !single_instance() {
         message("Jester уже запущен.");
         return;
@@ -29,8 +32,9 @@ fn main() {
     let settings = Arc::new(settings::Store::load());
     let core = Arc::new(core::Core::new());
     let (tx, rx) = std::sync::mpsc::channel::<String>();
-    let app = Arc::new(AppState { settings: settings.clone(), core: core.clone(), win: Mutex::new(Some(tx)) });
-    core::watch_exit(core.clone(), settings.clone());
+    let runtime = Arc::new(runtime::Runtime::new(&settings.current()));
+    let app = Arc::new(AppState { settings: settings.clone(), core: core.clone(), runtime: runtime.clone(), win: Mutex::new(Some(tx)) });
+    core::watch_exit(core.clone(), settings.clone(), runtime);
     api::guardian(app.clone());
     let server = app.clone();
     std::thread::spawn(move || {
@@ -86,7 +90,7 @@ fn open_window(app: Arc<AppState>, rx: std::sync::mpsc::Receiver<String>) {
         webview.with_default_context_menus(false)
     };
     let webview = webview
-        .with_url(format!("http://127.0.0.1:{}/?v=24", models::APP_PORT))
+        .with_url(format!("http://127.0.0.1:{}/?v=26", models::APP_PORT))
         .with_ipc_handler(move |req| {
             let msg = req.body().trim().trim_matches(|c| c == '"' || c == '\'').to_string();
             if msg == "drag" {

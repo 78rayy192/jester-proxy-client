@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { clash, formatSpeed, hostMsg, api, sanitizeBps } from './lib/api'
 import { t } from './lib/i18n'
@@ -68,24 +68,29 @@ function applyTheme() {
   const a = useApp.getState().settings?.appearance
   if (!a) return
   const r = document.documentElement.style
-  const light = luminance(a.background) > 0.42
+  const systemLight = window.matchMedia?.('(prefers-color-scheme: light)').matches ?? false
+  const follow = a.theme === 'system'
+  const savedLight = luminance(a.background) > 0.42
+  const light = follow ? systemLight : savedLight
+  const swapped = follow && light !== savedLight
   const onyx = ['#0b101b', '#11151c', '#090a0e', '#12161f', '#182235', '#07090e', '#090909', '#0c0c10', '#000000']
   const chosen = (a.background || '').toLowerCase()
-  const keep = onyx.includes(chosen)
-  const bg = keep ? '#0c0c10' : a.background
+  const keep = !swapped && onyx.includes(chosen)
+  const bg = swapped ? (light ? '#f4f6fb' : '#11151c') : (keep ? '#0c0c10' : a.background)
+  const text = swapped ? (light ? '#1a1d27' : '#edf2fa') : a.text
   r.setProperty('--bg', bg)
-  r.setProperty('--bg-elev', light && !keep ? mixHex(a.background, '#ffffff', 0.55) : mixHex(bg, '#ffffff', 0.06))
-  r.setProperty('--surface', rgba(a.text, light ? 0.06 : 0.05))
-  r.setProperty('--surface-2', rgba(a.text, light ? 0.1 : 0.09))
-  r.setProperty('--line', rgba(a.text, light ? 0.16 : 0.14))
-  r.setProperty('--line-soft', rgba(a.text, light ? 0.1 : 0.08))
-  r.setProperty('--text', a.text)
-  r.setProperty('--muted', rgba(a.text, light ? 0.68 : 0.62))
-  r.setProperty('--faint', rgba(a.text, light ? 0.45 : 0.38))
+  r.setProperty('--bg-elev', light && !keep ? mixHex(bg, '#ffffff', 0.55) : mixHex(bg, '#ffffff', 0.06))
+  r.setProperty('--surface', rgba(text, light ? 0.06 : 0.05))
+  r.setProperty('--surface-2', rgba(text, light ? 0.1 : 0.09))
+  r.setProperty('--line', rgba(text, light ? 0.16 : 0.14))
+  r.setProperty('--line-soft', rgba(text, light ? 0.1 : 0.08))
+  r.setProperty('--text', text)
+  r.setProperty('--muted', rgba(text, light ? 0.68 : 0.62))
+  r.setProperty('--faint', rgba(text, light ? 0.45 : 0.38))
   r.setProperty('--accent', a.accent)
   r.setProperty('--accent-ink', luminance(a.accent) > 0.35 ? '#17130d' : '#ffffff')
   r.setProperty('--accent-2', a.accentMuted)
-  r.setProperty('--panel', light ? rgba(a.text, 0.025) : 'rgba(0,0,0,.09)')
+  r.setProperty('--panel', light ? rgba(text, 0.025) : 'rgba(0,0,0,.09)')
   const density = Math.min(0.55, Math.max(0.06, a.glassTintOpacity ?? 0.1))
   r.setProperty('--glass-alpha', String(density))
   r.setProperty('--glass-base', a.glass ? (light ? `rgba(255,255,255,${density})` : `rgba(12,16,26,${Math.max(0.35, density)})`) : r.getPropertyValue('--bg-elev'))
@@ -109,6 +114,38 @@ function applyTheme() {
   document.documentElement.dataset.motion = a.animations === false ? 'off' : 'on'
   r.setProperty('--glass-fill', a.glass ? String(density) : '1')
   document.body.style.opacity = '1'
+}
+
+function Notices() {
+  const [items, setItems] = useState<{ id: number; text: string; level: string }[]>([])
+  const seen = useRef(0)
+  useEffect(() => {
+    let alive = true
+    const tick = async () => {
+      try {
+        const data = await api.notices(seen.current)
+        if (!alive || !data.items.length) return
+        seen.current = data.items[data.items.length - 1].id
+        setItems((prev) => [...prev, ...data.items].slice(-4))
+      } catch { /* ignore */ }
+    }
+    void tick()
+    const timer = window.setInterval(tick, 3000)
+    return () => { alive = false; window.clearInterval(timer) }
+  }, [])
+  useEffect(() => {
+    if (!items.length) return
+    const timer = window.setTimeout(() => setItems((prev) => prev.slice(1)), 8000)
+    return () => window.clearTimeout(timer)
+  }, [items])
+  if (!items.length) return null
+  return <div className="toasts">
+    {items.map((item) => (
+      <button key={item.id} type="button" className={'toast ' + item.level} onClick={() => setItems((prev) => prev.filter((row) => row.id !== item.id))}>
+        {item.text}
+      </button>
+    ))}
+  </div>
 }
 
 function LiveChip() {
@@ -162,6 +199,14 @@ export function App() {
   }, [refresh, status?.running, visible])
 
   useEffect(() => { applyTheme() }, [settings?.appearance])
+
+  useEffect(() => {
+    if (settings?.appearance?.theme !== 'system') return
+    const media = window.matchMedia('(prefers-color-scheme: light)')
+    const onChange = () => applyTheme()
+    media.addEventListener('change', onChange)
+    return () => media.removeEventListener('change', onChange)
+  }, [settings?.appearance?.theme])
 
   useEffect(() => {
     const online = !!status?.running && (settings?.connectionHighlight !== false)
@@ -353,6 +398,7 @@ export function App() {
         </main>
       </div>
       {settings?.appearance?.customCss ? <style>{settings.appearance.customCss}</style> : null}
+      <Notices />
       <Onboarding />
     </div>
   )

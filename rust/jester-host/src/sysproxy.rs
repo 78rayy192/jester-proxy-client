@@ -60,11 +60,17 @@ fn notify() {
 fn set_linux(enable: bool, port: i32) -> Result<(), String> {
     if enable {
         gnome_proxy(true, port);
+        desktop_schema_proxy(true, port);
+        kde_proxy(true, port);
+        xfce_proxy(true, port);
         write_environment(port);
         session_environment(true, port);
         std::fs::write(paths::sysproxy_state(), port.to_string()).map_err(|e| e.to_string())?;
     } else {
         gnome_proxy(false, 0);
+        desktop_schema_proxy(false, 0);
+        kde_proxy(false, 0);
+        xfce_proxy(false, 0);
         clear_environment();
         session_environment(false, 0);
         let _ = std::fs::remove_file(paths::sysproxy_state());
@@ -97,6 +103,88 @@ fn gnome_proxy(enable: bool, port: i32) {
         let _ = std::process::Command::new("gsettings").args(["set", schema, "port", &port_s]).status();
     }
     let _ = std::process::Command::new("gsettings").args(["set", "org.gnome.system.proxy", "ignore-hosts", "['localhost', '127.0.0.0/8', '::1', '10.0.0.0/8', '192.168.0.0/16', '172.16.0.0/12']"]).status();
+}
+
+#[cfg(not(windows))]
+fn desktop_schema_proxy(enable: bool, port: i32) {
+    for schema in ["org.cinnamon.desktop.proxy", "org.mate.system.proxy"] {
+        apply_gsettings_schema(schema, enable, port);
+    }
+}
+
+#[cfg(not(windows))]
+fn apply_gsettings_schema(schema: &str, enable: bool, port: i32) {
+    if !paths::program_exists("gsettings") { return; }
+    let probe = std::process::Command::new("gsettings").args(["get", schema, "mode"]).output();
+    if !probe.map(|o| o.status.success()).unwrap_or(false) { return; }
+    if !enable {
+        let _ = std::process::Command::new("gsettings").args(["set", schema, "mode", "none"]).status();
+        return;
+    }
+    let port_s = port.to_string();
+    let _ = std::process::Command::new("gsettings").args(["set", schema, "mode", "manual"]).status();
+    for sub in ["http", "https", "socks"] {
+        let child = format!("{schema}.{sub}");
+        let _ = std::process::Command::new("gsettings").args(["set", &child, "host", "127.0.0.1"]).status();
+        let _ = std::process::Command::new("gsettings").args(["set", &child, "port", &port_s]).status();
+    }
+}
+
+#[cfg(not(windows))]
+fn kde_proxy(enable: bool, port: i32) {
+    let tool = if paths::program_exists("kwriteconfig6") {
+        "kwriteconfig6"
+    } else if paths::program_exists("kwriteconfig5") {
+        "kwriteconfig5"
+    } else {
+        return;
+    };
+    let write = |key: &str, value: &str| {
+        let _ = std::process::Command::new(tool)
+            .args(["--file", "kioslaverc", "--group", "Proxy Settings", "--key", key, value])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    };
+    if !enable {
+        write("ProxyType", "0");
+    } else {
+        let http = format!("http://127.0.0.1:{port}");
+        let socks = format!("socks://127.0.0.1:{port}");
+        write("ProxyType", "1");
+        write("httpProxy", &http);
+        write("httpsProxy", &http);
+        write("ftpProxy", &http);
+        write("socksProxy", &socks);
+        write("NoProxyFor", "localhost,127.0.0.1,::1,10.0.0.0/8,192.168.0.0/16,172.16.0.0/12");
+    }
+    if paths::program_exists("dbus-send") {
+        let _ = std::process::Command::new("dbus-send")
+            .args(["--type=signal", "/KIO/Scheduler", "org.kde.KIO.Scheduler.reparseSlaveConfiguration", "string:"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+#[cfg(not(windows))]
+fn xfce_proxy(enable: bool, port: i32) {
+    if !paths::program_exists("xfconf-query") { return; }
+    let pairs = [
+        ("/environment/http_proxy", format!("http://127.0.0.1:{port}")),
+        ("/environment/https_proxy", format!("http://127.0.0.1:{port}")),
+        ("/environment/ALL_PROXY", format!("socks5://127.0.0.1:{port}")),
+        ("/environment/NO_PROXY", "localhost,127.0.0.1,::1".to_string()),
+    ];
+    for (key, value) in pairs {
+        let mut cmd = std::process::Command::new("xfconf-query");
+        cmd.args(["-c", "xfce4-session", "-n", "-p", key, "-t", "string"]);
+        if enable { cmd.args(["-s", &value]); } else { cmd.arg("-r"); }
+        cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        let _ = cmd.status();
+    }
 }
 
 #[cfg(not(windows))]
@@ -150,4 +238,22 @@ fn session_environment(enable: bool, port: i32) {
         .arg("--systemd")
         .args(values.iter().map(String::as_str))
         .status();
+}
+
+pub fn desktop_notice(text: &str) {
+    let text = text.trim();
+    if text.is_empty() { return; }
+    #[cfg(not(windows))]
+    if paths::program_exists("notify-send") {
+        let _ = std::process::Command::new("notify-send")
+            .args(["-a", "Jester", "-i", "network-vpn", "Jester", text])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(windows)]
+    {
+        let _ = text;
+    }
 }

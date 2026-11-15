@@ -48,8 +48,8 @@ fn embed_icon(icon: &std::path::Path) {
         format!(
             "1 ICON \"{icon_rc}\"\n\
 1 VERSIONINFO\n\
-FILEVERSION 1,1,0,0\n\
-PRODUCTVERSION 1,1,0,0\n\
+FILEVERSION 1,2,0,0\n\
+PRODUCTVERSION 1,2,0,0\n\
 BEGIN\n\
   BLOCK \"StringFileInfo\"\n\
   BEGIN\n\
@@ -58,7 +58,7 @@ BEGIN\n\
       VALUE \"FileDescription\", \"Jester\"\n\
       VALUE \"ProductName\", \"Jester\"\n\
       VALUE \"OriginalFilename\", \"jester.exe\"\n\
-      VALUE \"FileVersion\", \"1.1.0\"\n\
+      VALUE \"FileVersion\", \"1.2.0\"\n\
     END\n\
   END\n\
   BLOCK \"VarFileInfo\"\n\

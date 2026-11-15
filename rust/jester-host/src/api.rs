@@ -18,6 +18,7 @@ use tower_http::services::ServeDir;
 pub struct AppState {
     pub settings: Arc<Store>,
     pub core: Arc<Core>,
+    pub runtime: Arc<crate::runtime::Runtime>,
     pub win: Mutex<Option<std::sync::mpsc::Sender<String>>>,
 }
 
@@ -125,6 +126,12 @@ fn handle(app: &AppState, method: &Method, path: &str, query: &str, body: &Value
             Ok(json!({"updated": updated, "failed": failed, "errors": errors}))
         }
         "GET /api/app/update" => Ok(check_update()),
+        "POST /api/app/update/download" => download_update(),
+        "GET /api/notices" => {
+            let after = query_map(query).get("after").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+            Ok(json!({"items": app.runtime.notices_after(after)}))
+        }
+        "GET /api/processes" => Ok(json!({"names": running_processes()})),
         "POST /api/settings/import" => {
             let next: AppSettings = serde_json::from_value(body.clone()).map_err(|_| "Пустой файл настроек.".to_string())?;
             Ok(serde_json::to_value(app.settings.save(next)?).unwrap())
@@ -139,9 +146,10 @@ fn handle(app: &AppState, method: &Method, path: &str, query: &str, body: &Value
         }
         "GET /api/guardian" => {
             let s = app.settings.current();
+            let (message, lane, rtt, exit_ip) = app.runtime.snapshot();
             Ok(json!({
-                "message": s.guardian_message, "lane": s.adaptive_lane_state, "rttMs": s.last_measured_rtt_ms,
-                "deadManArmed": s.dead_man_armed, "exitIp": s.last_known_exit_ip, "exitOrg": s.last_known_exit_org,
+                "message": message, "lane": lane, "rttMs": rtt,
+                "deadManArmed": s.dead_man_armed, "exitIp": exit_ip, "exitOrg": s.last_known_exit_org,
                 "smartDirect": s.smart_direct_domains, "dnsPoolIndex": s.dns_pool_index
             }))
         }
@@ -395,23 +403,56 @@ fn learn_direct(app: &AppState) -> Result<Value, String> {
 
 fn leak(app: &AppState) -> Result<Value, String> {
     let s = app.settings.current();
+    let status = app.core.status(&s);
     let mut exit_ip = None;
     if app.core.running() {
         let proxy = reqwest::Proxy::http(format!("http://127.0.0.1:{}", s.mixed_port)).ok();
         if let Some(proxy) = proxy {
             if let Ok(client) = reqwest::blocking::Client::builder().proxy(proxy).timeout(std::time::Duration::from_secs(12)).build() {
-                exit_ip = client.get("https://api.ipify.org").send().ok().and_then(|r| r.text().ok()).map(|t| t.trim().to_string());
+                exit_ip = client.get("https://api.ipify.org").send().ok().and_then(|r| r.text().ok()).map(|t| t.trim().to_string()).filter(|ip| !ip.is_empty());
             }
         }
     }
+    let dns_ip = if app.core.running() { query_dns_txt("whoami.cloudflare") } else { None };
+    let dns_match = exit_ip.as_deref().zip(dns_ip.as_deref()).map(|(exit, dns)| crate::logic::dns_matches(exit, dns));
+    let summary = match dns_match {
+        Some(true) => "DNS совпадает",
+        Some(false) => "DNS отличается",
+        None => "Нет ответа DNS",
+    };
+    let message = match dns_match {
+        Some(true) => "Адрес DNS и адрес выхода совпадают. Это не доказывает отсутствие утечек.",
+        Some(false) => "DNS виден с другого адреса, чем выходной узел.",
+        None if exit_ip.is_some() => "Адрес выхода получен. DNS не ответил.",
+        None => "Не удалось определить адрес выхода.",
+    };
+    let score = if !app.core.running() { 40 } else if dns_match == Some(true) { 90 } else if exit_ip.is_some() { 70 } else { 40 };
+    let checks = vec![
+        json!({"id": "exit", "label": "Адрес выхода", "ok": exit_ip.is_some(), "weight": 40, "detail": exit_ip.clone().unwrap_or_default()}),
+        json!({"id": "dns", "label": "DNS и выход", "ok": dns_match.unwrap_or(false), "weight": 40, "detail": message}),
+    ];
     Ok(json!({
         "exitIp": exit_ip,
         "realIp": Value::Null,
-        "masked": exit_ip.is_some(),
-        "score": if app.core.running() { 80 } else { 40 },
-        "message": if exit_ip.is_some() { "Адрес выхода получен." } else { "Не удалось определить адрес выхода." },
-        "checks": []
+        "dnsIp": dns_ip,
+        "masked": dns_match == Some(false),
+        "tunMode": status.tun_up,
+        "score": score,
+        "summary": summary,
+        "message": message,
+        "checks": checks
     }))
+}
+
+fn query_dns_txt(host: &str) -> Option<String> {
+    use std::net::UdpSocket;
+    let packet = crate::logic::encode_dns_query(0x4a57, host);
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.set_read_timeout(Some(std::time::Duration::from_secs(3))).ok()?;
+    sock.send_to(&packet, "1.1.1.1:53").ok()?;
+    let mut buf = [0u8; 512];
+    let (len, _) = sock.recv_from(&mut buf).ok()?;
+    crate::logic::parse_dns_txt(&buf[..len]).filter(|ip| ip.len() <= 64 && ip.chars().all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':'))
 }
 
 fn panic(app: &AppState) -> Result<Value, String> {
@@ -444,8 +485,74 @@ fn check_update() -> Value {
     let Ok(doc) = res.json::<Value>() else { return json!({"current": APP_VERSION, "updateAvailable": false, "message": "Не удалось проверить обновления."}); };
     let tag = doc.get("tag_name").and_then(|v| v.as_str()).unwrap_or("").trim_start_matches('v').to_string();
     let url = doc.get("html_url").and_then(|v| v.as_str()).unwrap_or("");
+    let assets = doc.get("assets").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let os_name = if cfg!(windows) { "windows" } else { "linux" };
+    let picked = crate::logic::release_asset(&assets, os_name);
     let newer = tag.split('.').filter_map(|p| p.parse::<u32>().ok()).gt(APP_VERSION.split('.').filter_map(|p| p.parse::<u32>().ok()));
-    json!({"current": APP_VERSION, "latest": tag, "updateAvailable": newer, "releaseUrl": url, "message": if newer { format!("Доступна версия {tag}.") } else { "Установлена актуальная версия.".into() }})
+    json!({
+        "current": APP_VERSION,
+        "latest": tag,
+        "updateAvailable": newer,
+        "releaseUrl": url,
+        "downloadUrl": picked.map(|(_, asset)| asset).unwrap_or(""),
+        "downloadName": picked.map(|(name, _)| name).unwrap_or(""),
+        "message": if newer { format!("Доступна версия {tag}.") } else { "Установлена актуальная версия.".into() }
+    })
+}
+
+fn download_update() -> Result<Value, String> {
+    let info = check_update();
+    let url = info.get("downloadUrl").and_then(|v| v.as_str()).unwrap_or("");
+    if !info.get("updateAvailable").and_then(|v| v.as_bool()).unwrap_or(false) || url.is_empty() {
+        return Ok(json!({"ok": false, "message": "Обновление не найдено."}));
+    }
+    if !crate::logic::trusted_download(url) { return Err("Адрес загрузки не разрешён.".into()); }
+    let name = info.get("downloadName").and_then(|v| v.as_str()).unwrap_or("jester-update.bin");
+    let safe = std::path::Path::new(name).file_name().and_then(|s| s.to_str()).unwrap_or("jester-update.bin");
+    if !safe.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')) {
+        return Err("Имя файла обновления отклонено.".into());
+    }
+    crate::paths::ensure();
+    let dest = crate::paths::updates().join(safe);
+    let client = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(180)).build().map_err(|e| e.to_string())?;
+    let response = client.get(url).header("User-Agent", format!("Jester/{APP_VERSION}")).send().map_err(|e| e.to_string())?;
+    if !response.status().is_success() { return Err("Не удалось скачать обновление.".into()); }
+    let bytes = response.bytes().map_err(|e| e.to_string())?;
+    if bytes.len() > 120 * 1024 * 1024 { return Err("Файл обновления слишком большой.".into()); }
+    if bytes.len() < 1024 { return Err("Файл обновления пустой.".into()); }
+    std::fs::write(&dest, &bytes).map_err(|e| e.to_string())?;
+    Ok(json!({"ok": true, "path": dest.display().to_string(), "message": format!("Обновление сохранено: {}", dest.display())}))
+}
+
+fn running_processes() -> Vec<String> {
+    let mut names = Vec::new();
+    #[cfg(unix)]
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else { continue };
+            if pid <= 0 { continue; }
+            let Ok(text) = std::fs::read_to_string(format!("/proc/{pid}/comm")) else { continue };
+            let name = text.trim();
+            if name.len() < 2 || name.starts_with('[') { continue; }
+            if !names.iter().any(|have: &String| have.eq_ignore_ascii_case(name)) { names.push(name.to_string()); }
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = std::process::Command::new("tasklist");
+        cmd.args(["/FO", "CSV", "/NH"]).creation_flags(0x08000000);
+        if let Ok(out) = cmd.output() {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                let name = line.split(',').next().unwrap_or("").trim().trim_matches('"');
+                if name.len() < 2 || !name.to_ascii_lowercase().ends_with(".exe") { continue; }
+                if !names.iter().any(|have: &String| have.eq_ignore_ascii_case(name)) { names.push(name.to_string()); }
+            }
+        }
+    }
+    names.sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
+    if names.len() > 250 { names.truncate(250); }
+    names
 }
 
 fn root_domain(host: &str) -> Option<String> {
@@ -592,21 +699,23 @@ pub fn guardian(app: Arc<AppState>) {
                 let rush = if s.adaptive_lane && s.rf_rush_mode { app.core.best_delay(s.external_port, "RUSH", &s.latency_url, timeout).map(|(_, d)| d).unwrap_or(-1) } else { -1 };
                 let auto = app.core.best_delay(s.external_port, "AUTO", &s.latency_url, timeout).map(|(_, d)| d).unwrap_or(-1);
                 let measured = if rush > 0 { rush } else { auto };
-                if s.adaptive_lane && s.rf_rush_mode {
-                    let pick = if rush > 0 && rush <= s.adaptive_lane_bad_rtt_ms { "RUSH" } else { "AUTO" };
-                    let _ = app.settings.patch(|x| { if measured > 0 { x.last_measured_rtt_ms = measured; } x.adaptive_lane_state = pick.into(); });
-                    app.core.select(s.external_port, "PROXY", pick);
-                }
-                if s.latency_budget_enabled && measured > s.latency_budget_ms {
+                let pick = if s.adaptive_lane && s.rf_rush_mode {
+                    if rush > 0 && rush <= s.adaptive_lane_bad_rtt_ms { "RUSH" } else { "AUTO" }
+                } else { "" };
+                app.runtime.set_sample(measured, pick);
+                if !pick.is_empty() { app.core.select(s.external_port, "PROXY", pick); }
+                if s.latency_budget_enabled && app.runtime.latency_ready(measured, s.latency_budget_ms) {
+                    app.runtime.arm_cooldown(180);
                     if s.latency_budget_action == "warn" {
-                        let _ = app.settings.patch(|x| x.guardian_message = format!("Задержка {measured} мс выше порога {} мс.", s.latency_budget_ms));
+                        let text = format!("Задержка {measured} мс выше порога {} мс.", s.latency_budget_ms);
+                        app.runtime.note("warn", &text);
+                        sysproxy::desktop_notice(&text);
                     } else if let Some((name, delay)) = app.core.best_delay(s.external_port, "AUTO", &s.latency_url, timeout) {
                         app.core.select(s.external_port, "AUTO", &name);
                         app.core.select(s.external_port, "PROXY", &name);
-                        let _ = app.settings.patch(|x| {
-                            x.last_measured_rtt_ms = delay;
-                            x.guardian_message = format!("Задержка выше порога. Выбран {name}, {delay} мс.");
-                        });
+                        let text = format!("Задержка выше порога. Выбран {name}, {delay} мс.");
+                        app.runtime.note("warn", &text);
+                        sysproxy::desktop_notice(&text);
                     }
                 }
             }
@@ -615,19 +724,34 @@ pub fn guardian(app: Arc<AppState>) {
             if s.exit_consistency_check && exit_at.elapsed() >= std::time::Duration::from_secs(exit_every) {
                 exit_at = std::time::Instant::now();
                 if let Some(ip) = probe_exit(&s) {
-                    let prev = s.last_known_exit_ip.clone();
-                    let _ = app.settings.patch(|x| x.last_known_exit_ip = Some(ip.clone()));
-                    if let Some(prev) = prev.filter(|p| p != &ip) {
-                        match s.exit_check_action.as_str() {
-                            "warn" => { let _ = app.settings.patch(|x| x.guardian_message = format!("Адрес выхода сменился: {prev} → {ip}")); }
-                            "panic" => { let _ = panic(&app); }
-                            _ => {
-                                if let Some((name, _)) = app.core.best_delay(s.external_port, "AUTO", &s.latency_url, s.latency_timeout_ms.clamp(2000, 8000)) {
-                                    app.core.select(s.external_port, "PROXY", &name);
+                    match app.runtime.observe_exit(&ip) {
+                        crate::logic::ExitStep::Pending => {
+                            app.runtime.note_pending_once("Адрес выхода изменился. Ждём повторную проверку.");
+                        }
+                        crate::logic::ExitStep::Confirmed => {
+                            app.runtime.arm_cooldown(180);
+                            match s.exit_check_action.as_str() {
+                                "warn" => {
+                                    let text = format!("Адрес выхода сменился на {ip}.");
+                                    app.runtime.note("warn", &text);
+                                    sysproxy::desktop_notice(&text);
                                 }
-                                let _ = app.settings.patch(|x| x.guardian_message = format!("Адрес выхода сменился на {ip}. Узел переключён."));
+                                "panic" => {
+                                    app.runtime.note("warn", "Адрес выхода сменился. Подключение остановлено.");
+                                    sysproxy::desktop_notice("Адрес выхода сменился. Подключение остановлено.");
+                                    let _ = panic(&app);
+                                }
+                                _ => {
+                                    if let Some((name, _)) = app.core.best_delay(s.external_port, "AUTO", &s.latency_url, s.latency_timeout_ms.clamp(2000, 8000)) {
+                                        app.core.select(s.external_port, "PROXY", &name);
+                                    }
+                                    let text = format!("Адрес выхода сменился на {ip}. Узел переключён.");
+                                    app.runtime.note("warn", &text);
+                                    sysproxy::desktop_notice(&text);
+                                }
                             }
                         }
+                        _ => {}
                     }
                 }
             }

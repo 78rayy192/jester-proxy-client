@@ -4,7 +4,7 @@ import { api } from '../lib/api'
 import { t } from '../lib/i18n'
 import { useApp } from '../store/app'
 import { MenuSelect } from '../components/MenuSelect'
-import { EmptyState, formatExpire, formatQuota } from '../components/UiBits'
+import { EmptyState, formatExpire, formatQuota, quotaWarning } from '../components/UiBits'
 
 export function Profiles() {
   const { settings, profiles, busy, run, refresh } = useApp(useShallow(({ settings, profiles, busy, run, refresh }) => ({ settings, profiles, busy, run, refresh })))
@@ -68,6 +68,9 @@ export function Profiles() {
                   {formatExpire(p.expireUnix) ? ` · до ${formatExpire(p.expireUnix)}` : ''}
                   {p.hwidLimited ? ' · лимит устройств' : ''}
                 </p>
+              )}
+              {p.kind === 'subscription' && quotaWarning((p.upload || 0) + (p.download || 0), p.total || 0, p.expireUnix) && (
+                <p className="warn-text">{quotaWarning((p.upload || 0) + (p.download || 0), p.total || 0, p.expireUnix)}</p>
               )}
               <div className="field" style={{ marginTop: 8 }}>
                 <label>Изоляция сессии · TLS fingerprint</label>

@@ -74,6 +74,7 @@ pub fn merge(profile_yaml: &str, prepared: &AppSettings, secret: &str) -> Result
     tun.insert(s("mtu"), num(mtu as i64));
     tun.insert(s("endpoint-independent-nat"), Value::Bool(prepared.endpoint_independent_nat));
     tun.insert(s("dns-hijack"), if prepared.dns_hijack { seq_str(&["any:53", "tcp://any:53"]) } else { Value::Sequence(vec![]) });
+    tun.insert(s("exclude-interface"), seq_str(&crate::logic::tun_exclude_interfaces()));
     let inet4 = tun_ipv4(prepared);
     tun.insert(s("inet4-address"), seq_str(&[&inet4]));
     tun.insert(s("udp-timeout"), num(30));
@@ -167,11 +168,18 @@ fn apply_rules(doc: &mut Mapping, settings: &AppSettings) {
     for d in ALWAYS {
         rules.push(format!("DOMAIN-SUFFIX,{d},PROXY"));
     }
+    for token in crate::logic::process_tokens(&settings.custom_direct_rules) {
+        for name in crate::logic::process_rule_names(&token) {
+            rules.push(format!("PROCESS-NAME,{name},DIRECT"));
+        }
+    }
     if settings.per_app_fast_path {
-        for proc in settings.fast_path_processes.split([',', ';', '\n', '\r']) {
-            let proc = proc.trim();
-            if proc.is_empty() { continue; }
-            let name = if proc.to_ascii_lowercase().ends_with(".exe") { proc.to_string() } else { format!("{proc}.exe") };
+        for name in crate::logic::process_rule_names(&settings.fast_path_processes) {
+            rules.push(format!("PROCESS-NAME,{name},PROXY"));
+        }
+    }
+    for token in crate::logic::process_tokens(&settings.custom_proxy_rules) {
+        for name in crate::logic::process_rule_names(&token) {
             rules.push(format!("PROCESS-NAME,{name},PROXY"));
         }
     }
