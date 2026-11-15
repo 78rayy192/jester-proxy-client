@@ -110,7 +110,7 @@ export function Dashboard() {
       if (status?.running) await api.stop()
       else {
         const r = await api.start()
-        if (r.os !== 'linux' && (r.needsAdmin || r.message === 'admin-required')) await api.elevate()
+        if (r.os === 'windows' && (r.needsAdmin || r.message === 'admin-required')) await api.elevate()
       }
     })
   }
@@ -135,7 +135,7 @@ export function Dashboard() {
   }
 
   async function phantomPanic() {
-    if (!confirm('Остановить ядро, сбросить системный прокси и свернуть окно в область уведомлений?')) return
+    if (!confirm(status?.os === 'android' ? 'Остановить подключение и выключить VPN?' : 'Остановить ядро, сбросить системный прокси и свернуть окно в область уведомлений?')) return
     setPanicBusy(true)
     try {
       const r = await api.ghostPanic()
@@ -246,14 +246,14 @@ export function Dashboard() {
             <span className="server-chevron" aria-hidden="true">↗</span>
           </button>
           <div className="btn-row hero-actions">
-            {status?.os !== 'linux' && status?.needsAdmin && <button className="btn" onClick={() => run(() => api.elevate())}>{i.elevate}</button>}
+            {status?.os === 'windows' && status?.needsAdmin && <button className="btn" onClick={() => run(() => api.elevate())}>{i.elevate}</button>}
             <button className="btn" disabled={busy || !status?.running} onClick={() => run(() => api.restart())}>{i.restart}</button>
-            <button className="btn" disabled={busy} onClick={() => run(async () => {
+            {status?.os !== 'android' && <button className="btn" disabled={busy} onClick={() => run(async () => {
               await patchSettings({ tunEnabled: !settings?.tunEnabled })
               if (status?.running) await api.restart()
             })}>
               {settings?.tunEnabled ? 'Выключить туннель' : 'Включить туннель'}
-            </button>
+            </button>}
           </div>
           <div className="preset-row performance-presets" role="group" aria-label="Приоритет подключения">
             <button type="button" aria-pressed={settings?.performancePreset === 'speed'} className={'btn' + (settings?.performancePreset === 'speed' ? ' primary' : '')} disabled={busy} onClick={() => applyPreset('speed')}>Скорость</button>

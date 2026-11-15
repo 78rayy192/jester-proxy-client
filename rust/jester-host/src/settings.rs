@@ -120,6 +120,24 @@ pub fn normalize(s: &mut AppSettings) -> Result<(), String> {
     if s.dns.fake_ip_range.is_empty() { s.dns.fake_ip_range = DnsSettings::default().fake_ip_range; }
     if s.inet4_address.is_empty() { s.inet4_address = "172.19.0.1/30".into(); }
     if s.core_channel.is_empty() { s.core_channel = "v3".into(); }
+    #[cfg(target_os = "android")]
+    {
+        s.tun_enabled = true;
+        s.system_proxy = false;
+        s.auto_route = false;
+        s.auto_redirect = false;
+        s.auto_detect_interface = false;
+        s.strict_route = false;
+        s.tun_stack = "gvisor".into();
+        s.find_process_mode = "off".into();
+        s.per_app_fast_path = false;
+        s.ipv6 = false;
+        s.dns_hijack = true;
+        s.dns.enable = true;
+        s.close_to_tray = false;
+        s.start_hidden = false;
+        s.auto_start = false;
+    }
     if s.latency_url.trim().is_empty() { s.latency_url = "https://www.gstatic.com/generate_204".into(); }
     Ok(())
 }
@@ -158,8 +176,10 @@ fn upgrade_legacy(a: &mut AppearanceSettings) {
 fn apply_autostart(enable: bool) {
     #[cfg(windows)]
     apply_autostart_windows(enable);
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_os = "android")))]
     apply_autostart_linux(enable);
+    #[cfg(target_os = "android")]
+    { let _ = enable; }
 }
 
 #[cfg(windows)]
@@ -180,11 +200,11 @@ fn apply_autostart_windows(enable: bool) {
 }
 
 pub fn register_launcher() {
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_os = "android")))]
     register_launcher_linux();
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "android")))]
 fn register_launcher_linux() {
     let Ok(exe) = std::env::current_exe() else { return };
     let Some(home) = std::env::var_os("HOME") else { return };
@@ -208,7 +228,7 @@ fn register_launcher_linux() {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "android")))]
 fn launcher_icon() -> Option<std::path::PathBuf> {
     let candidates = [
         crate::paths::ui_dir().join("jester-head.png"),
@@ -218,7 +238,7 @@ fn launcher_icon() -> Option<std::path::PathBuf> {
     candidates.into_iter().find(|path| path.is_file())
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "android")))]
 fn apply_autostart_linux(enable: bool) {
     let Ok(exe) = std::env::current_exe() else { return };
     write_desktop_entry(enable, &exe);
@@ -226,7 +246,7 @@ fn apply_autostart_linux(enable: bool) {
     write_user_service(enable, &exe);
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "android")))]
 fn write_desktop_entry(enable: bool, exe: &std::path::Path) {
     let Some(home) = std::env::var_os("HOME") else { return };
     let dir = std::path::PathBuf::from(home).join(".config").join("autostart");
@@ -243,7 +263,7 @@ fn write_desktop_entry(enable: bool, exe: &std::path::Path) {
     let _ = std::fs::write(path, body);
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "android")))]
 fn write_user_service(enable: bool, exe: &std::path::Path) {
     let Some(home) = std::env::var_os("HOME") else { return };
     let dir = std::path::PathBuf::from(home).join(".config").join("systemd").join("user");
@@ -270,7 +290,7 @@ fn write_user_service(enable: bool, exe: &std::path::Path) {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "android")))]
 fn write_hypr_autostart(enable: bool, exe: &std::path::Path) {
     let Some(home) = std::env::var_os("HOME") else { return };
     let path = std::path::PathBuf::from(home).join(".config").join("hypr").join("modules").join("autostart.lua");
@@ -286,7 +306,7 @@ fn write_hypr_autostart(enable: bool, exe: &std::path::Path) {
     if next != text { let _ = std::fs::write(path, next); }
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "android")))]
 fn strip_hypr_block(text: &str) -> String {
     let mut out = String::new();
     let mut skip_exec = false;
@@ -305,7 +325,7 @@ fn strip_hypr_block(text: &str) -> String {
     out
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "android")))]
 fn insert_before_last_end(text: &str, block: &str) -> String {
     let Some(idx) = text.rfind("\nend)") else { return format!("{text}{block}"); };
     let mut next = String::with_capacity(text.len() + block.len());

@@ -158,8 +158,9 @@ export function formatExpire(unix?: number) {
 
 export function routeLabel(
   settings?: { tunEnabled?: boolean; systemProxy?: boolean; mode?: string } | null,
-  status?: { running?: boolean; tunUp?: boolean } | null,
+  status?: { running?: boolean; tunUp?: boolean; os?: string } | null,
 ) {
+  if (status?.os === 'android') return 'VPN'
   if (!settings) return 'Не задано'
   const tunLive = !!settings.tunEnabled && !(status?.running && status.tunUp === false)
   if (tunLive && settings.systemProxy) return 'Туннель и прокси'

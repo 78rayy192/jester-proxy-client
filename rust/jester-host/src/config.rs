@@ -35,6 +35,8 @@ pub fn merge(profile_yaml: &str, prepared: &AppSettings, secret: &str) -> Result
     apply_client_fingerprint(map, fp);
     let ua = if cfg!(windows) {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    } else if cfg!(target_os = "android") {
+        "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
     } else {
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     };
@@ -78,6 +80,18 @@ pub fn merge(profile_yaml: &str, prepared: &AppSettings, secret: &str) -> Result
     let inet4 = tun_ipv4(prepared);
     tun.insert(s("inet4-address"), seq_str(&[&inet4]));
     tun.insert(s("udp-timeout"), num(30));
+    #[cfg(target_os = "android")]
+    {
+        tun.insert(s("enable"), Value::Bool(true));
+        tun.insert(s("device"), s("tun"));
+        tun.insert(s("stack"), s("gvisor"));
+        tun.insert(s("auto-route"), Value::Bool(false));
+        tun.insert(s("auto-detect-interface"), Value::Bool(false));
+        tun.insert(s("auto-redirect"), Value::Bool(false));
+        tun.insert(s("strict-route"), Value::Bool(false));
+        tun.insert(s("file-descriptor"), num(crate::android::tun_fd() as i64));
+        tun.remove(&s("exclude-interface"));
+    }
     set(map, "tun", Value::Mapping(tun));
     if prepared.dns.enable {
         let via = prepared.dns_via_proxy;
@@ -317,12 +331,12 @@ fn wrap_dns(server: &str, via: bool) -> String {
 fn tun_ipv4(prepared: &AppSettings) -> String {
     let configured = prepared.inet4_address.trim();
     let configured = if configured.is_empty() { "172.19.0.1/30" } else { configured };
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "android")))]
     if ipv4_taken(configured) { return "172.31.0.1/30".into(); }
     configured.to_string()
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 fn ipv4_taken(cidr: &str) -> bool {
     let ip = cidr.split('/').next().unwrap_or("").trim();
     if ip.is_empty() { return false; }
