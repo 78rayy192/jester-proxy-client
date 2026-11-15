@@ -184,6 +184,15 @@ export function Proxies() {
       {testError && <div className="banner warn">{testError}</div>}
 
       <div className="mode-bar">
+        {status?.os === 'android' ? (
+          <div className="mode-card">
+            <div>
+              <div className="k">VPN</div>
+              <div className="hint">Весь трафик идёт через системный VPN</div>
+            </div>
+          </div>
+        ) : (
+          <>
         <div className="mode-card">
           <div>
             <div className="k">Туннель</div>
@@ -201,6 +210,8 @@ export function Proxies() {
           </div>
           <button type="button" role="switch" aria-label={status?.os === 'linux' ? 'Системный прокси' : 'Системный прокси Windows'} aria-checked={proxyOn && winProxy} className={'toggle' + (proxyOn && winProxy ? ' on' : '')} disabled={busy} onClick={() => run(toggleSysProxy)} />
         </div>
+          </>
+        )}
         <div className="mode-card">
           <div>
             <div className="k">Сервер</div>

@@ -2,9 +2,10 @@
 <html lang="ru">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Jester</title>
     <script>
+      if (/Android/i.test(navigator.userAgent)) document.documentElement.dataset.platform = 'android'
       document.addEventListener('contextmenu', function (e) { e.preventDefault() })
       document.addEventListener('selectstart', function (e) {
         var node = e.target

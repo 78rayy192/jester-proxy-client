@@ -25,9 +25,13 @@ export function Onboarding() {
   const steps = [
     {
       title: 'Ядро',
-      text: 'Загрузите сетевое ядро. Без него подключение недоступно.',
+      text: status?.os === 'android'
+        ? 'Ядро уже внутри приложения. Отдельно загружать его не нужно.'
+        : 'Загрузите сетевое ядро. Без него подключение недоступно.',
       done: !!status?.coreInstalled,
-      action: (
+      action: status?.os === 'android' ? (
+        <button className="btn primary" disabled>{status?.coreInstalled ? 'Готово' : 'Нет в сборке'}</button>
+      ) : (
         <button className="btn primary" disabled={busy || !!status?.coreInstalled} onClick={() => run(async () => { await api.download(); await refresh() })}>
           {status?.coreInstalled ? 'Готово' : 'Загрузить ядро'}
         </button>
@@ -35,22 +39,28 @@ export function Onboarding() {
     },
     {
       title: 'Профиль',
-      text: 'Добавьте ссылку подписки или конфигурацию.',
+      text: status?.os === 'android'
+        ? 'Вставьте ссылку подписки или отсканируйте QR на главном экране.'
+        : 'Добавьте ссылку подписки или конфигурацию.',
       done: profiles.length > 0,
-      action: (
+      action: status?.os === 'android' ? (
+        <button className="btn primary" onClick={() => { setPaused(true); setPage('dashboard') }}>На главный экран</button>
+      ) : (
         <button className="btn primary" onClick={() => { setPaused(true); setPage('profiles') }}>Открыть профили</button>
       ),
     },
     {
       title: 'Запуск',
-      text: status?.os === 'linux'
+      text: status?.os === 'android'
+        ? 'Запустите подключение. Система спросит разрешение на VPN: на Android это единственный режим, через него идёт весь трафик.'
+        : status?.os === 'linux'
         ? 'Выберите режим и запустите подключение. Туннель и системный прокси включаются вместе.'
         : 'Выберите режим маршрутизации и запустите подключение. Для системного туннеля нужны права администратора.',
       done: !!status?.running,
       action: (
         <button className="btn primary" disabled={busy || !!status?.running || !status?.coreInstalled || !profiles.length} onClick={() => run(async () => {
           const r = await api.start()
-          if (r.os !== 'linux' && (r.needsAdmin || r.message === 'admin-required')) await api.elevate()
+          if (r.os === 'windows' && (r.needsAdmin || r.message === 'admin-required')) await api.elevate()
           await refresh()
         })}>
           {status?.running ? 'Активен' : 'Запустить'}

@@ -47,13 +47,15 @@ impl Downloader {
 }
 
 fn os_name() -> &'static str {
-    if cfg!(windows) { "windows" } else { "linux" }
+    if cfg!(windows) { "windows" } else if cfg!(target_os = "android") { "android" } else { "linux" }
 }
 
 fn arch_name() -> &'static str {
     match std::env::consts::ARCH {
         "x86_64" => "amd64",
         "aarch64" => "arm64",
+        "arm" => "armv7",
+        "x86" => "386",
         other => other,
     }
 }
@@ -147,6 +149,8 @@ fn extract_core(archive: &std::path::Path, dest: &std::path::Path) -> Result<(),
     if !valid_core(&bytes) {
         return Err(if cfg!(windows) {
             "В архиве нет корректного исполняемого файла Windows.".into()
+        } else if cfg!(target_os = "android") {
+            "В архиве нет корректного исполняемого файла Android.".into()
         } else {
             "В архиве нет корректного исполняемого файла Linux.".into()
         });
