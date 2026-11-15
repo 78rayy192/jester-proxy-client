@@ -179,11 +179,51 @@ fn apply_autostart_windows(enable: bool) {
     }
 }
 
+pub fn register_launcher() {
+    #[cfg(not(windows))]
+    register_launcher_linux();
+}
+
+#[cfg(not(windows))]
+fn register_launcher_linux() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let Some(home) = std::env::var_os("HOME") else { return };
+    let home = std::path::PathBuf::from(home);
+    let apps = home.join(".local").join("share").join("applications");
+    let icon_dir = home.join(".local").join("share").join("icons").join("hicolor").join("256x256").join("apps");
+    let _ = std::fs::create_dir_all(&apps);
+    let _ = std::fs::create_dir_all(&icon_dir);
+    let icon_file = icon_dir.join("jester.png");
+    if let Some(src) = launcher_icon() {
+        let _ = std::fs::copy(src, &icon_file);
+    }
+    let icon = if icon_file.exists() { icon_file.display().to_string() } else { "jester".into() };
+    let body = format!(
+        "[Desktop Entry]\nType=Application\nVersion=1.1\nName=Jester\nGenericName=Прокси\nComment=Защищённое подключение\nExec=\"{}\"\nIcon={icon}\nTerminal=false\nCategories=Network;\nStartupNotify=true\nStartupWMClass=jester\n",
+        exe.display()
+    );
+    let _ = std::fs::write(apps.join("jester.desktop"), body);
+    if crate::paths::program_exists("update-desktop-database") {
+        let _ = std::process::Command::new("update-desktop-database").arg(&apps).status();
+    }
+}
+
+#[cfg(not(windows))]
+fn launcher_icon() -> Option<std::path::PathBuf> {
+    let candidates = [
+        crate::paths::ui_dir().join("jester-head.png"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/public/jester-head.png"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/dist/jester-head.png"),
+    ];
+    candidates.into_iter().find(|path| path.is_file())
+}
+
 #[cfg(not(windows))]
 fn apply_autostart_linux(enable: bool) {
     let Ok(exe) = std::env::current_exe() else { return };
     write_desktop_entry(enable, &exe);
     write_hypr_autostart(enable, &exe);
+    write_user_service(enable, &exe);
 }
 
 #[cfg(not(windows))]
@@ -201,6 +241,33 @@ fn write_desktop_entry(enable: bool, exe: &std::path::Path) {
         exe.display()
     );
     let _ = std::fs::write(path, body);
+}
+
+#[cfg(not(windows))]
+fn write_user_service(enable: bool, exe: &std::path::Path) {
+    let Some(home) = std::env::var_os("HOME") else { return };
+    let dir = std::path::PathBuf::from(home).join(".config").join("systemd").join("user");
+    let path = dir.join("jester.service");
+    if !enable {
+        if crate::paths::program_exists("systemctl") {
+            let _ = std::process::Command::new("systemctl").args(["--user", "disable", "jester.service"]).status();
+        }
+        let _ = std::fs::remove_file(&path);
+        if crate::paths::program_exists("systemctl") {
+            let _ = std::process::Command::new("systemctl").args(["--user", "daemon-reload"]).status();
+        }
+        return;
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let body = format!(
+        "[Unit]\nDescription=Jester\nAfter=graphical-session.target\n\n[Service]\nType=simple\nExecStart=\"{}\"\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy=graphical-session.target\n",
+        exe.display()
+    );
+    let _ = std::fs::write(&path, body);
+    if crate::paths::program_exists("systemctl") {
+        let _ = std::process::Command::new("systemctl").args(["--user", "daemon-reload"]).status();
+        let _ = std::process::Command::new("systemctl").args(["--user", "enable", "jester.service"]).status();
+    }
 }
 
 #[cfg(not(windows))]

@@ -1,5 +1,5 @@
 import { useShallow } from 'zustand/react/shallow'
-import { cloneElement, isValidElement, type ReactNode } from 'react'
+import { cloneElement, isValidElement, useState, type ReactNode } from 'react'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
 import { useApp } from '../store/app'
@@ -26,14 +26,24 @@ export function Settings() {
   const { settings, status, busy, patchSettings, run, refresh } = useApp(useShallow(({ settings, status, busy, patchSettings, run, refresh }) => ({ settings, status, busy, patchSettings, run, refresh })))
   const i = t(settings?.language || 'ru')
   const linux = status?.os === 'linux'
+  const [advanced, setAdvanced] = useState(() => localStorage.getItem('jester-settings-advanced') === '1')
+  const [procs, setProcs] = useState<string[] | null>(null)
+  const [updateNote, setUpdateNote] = useState('')
   if (!settings) return <div className="empty"><h3>{i.settings}</h3><p>Служба приложения недоступна.</p></div>
   const s = settings
   const num = (k: keyof typeof s, v: string) => patchSettings({ [k]: Number(v) || 0 } as never)
 
   return (
     <div>
-      <div className="page-head"><div><h1>{i.settings}</h1><p>Сетевые параметры вступают в силу после нажатия «Применить и перезапустить».</p></div>
-        <button className="btn primary" disabled={busy} onClick={() => run(() => api.restart())}>Применить и перезапустить</button>
+      <div className="page-head"><div><h1>{i.settings}</h1><p>{advanced ? 'Сетевые параметры вступают в силу после нажатия «Применить и перезапустить».' : 'Короткий список. Остальные параметры открываются кнопкой справа.'}</p></div>
+        <div className="btn-row">
+          <button className="btn" onClick={() => setAdvanced((value) => {
+            const next = !value
+            localStorage.setItem('jester-settings-advanced', next ? '1' : '0')
+            return next
+          })}>{advanced ? 'Короткий список' : 'Все параметры'}</button>
+          <button className="btn primary" disabled={busy} onClick={() => run(() => api.restart())}>Применить и перезапустить</button>
+        </div>
       </div>
       <div className="card" style={{ marginBottom: 16 }}>
         <h2>Служба</h2>
@@ -75,13 +85,20 @@ export function Settings() {
           }}>Импорт настроек</button>
           <button className="btn" disabled={busy} onClick={() => run(async () => {
             const r = await api.checkUpdate()
+            setUpdateNote(r.message)
             if (r.updateAvailable && r.releaseUrl) {
               if (confirm(r.message + '\nОткрыть страницу релиза?')) window.open(r.releaseUrl, '_blank')
             } else alert(r.message)
           })}>Проверить обновления</button>
+          <button className="btn" disabled={busy} onClick={() => run(async () => {
+            const r = await api.downloadUpdate()
+            setUpdateNote(r.message)
+            alert(r.message)
+          })}>Скачать обновление</button>
         </div>
+        {updateNote && <p className="hint" style={{ marginTop: 8 }}>{updateNote}</p>}
       </div>
-      <div className="card" style={{ marginBottom: 16 }}>
+      {advanced && <div className="card" style={{ marginBottom: 16 }}>
         <h2>Скорость и конфиденциальность</h2>
         <Row label="Адаптивный канал" hint="Переключает RUSH и AUTO по живой задержке.">
           <button className={'toggle' + ((s.adaptiveLane ?? true) ? ' on' : '')} onClick={() => patchSettings({ adaptiveLane: !(s.adaptiveLane ?? true) })} />
@@ -89,11 +106,26 @@ export function Settings() {
         <Row label="Warm start" hint="Прогрев лучших узлов сразу после запуска ядра.">
           <button className={'toggle' + ((s.warmStart ?? true) ? ' on' : '')} onClick={() => patchSettings({ warmStart: !(s.warmStart ?? true) })} />
         </Row>
-        <Row label="Быстрый путь приложений" hint="Выбранные процессы всегда идут через PROXY.">
+        <Row label="Быстрый путь приложений" hint={linux ? 'Имена процессов без .exe. Строка chrome.exe на Linux тоже подходит.' : 'Выбранные процессы всегда идут через PROXY.'}>
           <button className={'toggle' + ((s.perAppFastPath ?? true) ? ' on' : '')} onClick={() => patchSettings({ perAppFastPath: !(s.perAppFastPath ?? true) })} />
         </Row>
         <div className="field"><label>Процессы (по одному в строке)</label>
           <textarea rows={4} value={s.fastPathProcesses || ''} onChange={(e) => patchSettings({ fastPathProcesses: e.target.value })} />
+          <div className="btn-row" style={{ marginTop: 8 }}>
+            <button type="button" className="btn" disabled={busy} onClick={() => run(async () => setProcs((await api.processes()).names))}>Из запущенных</button>
+          </div>
+          {procs && (
+            <div className="proc-pick">
+              {procs.slice(0, 80).map((name) => (
+                <button type="button" key={name} className="btn" onClick={() => {
+                  const lines = (s.fastPathProcesses || '').split('\n').map((line) => line.trim()).filter(Boolean)
+                  if (!lines.some((line) => line.toLowerCase() === name.toLowerCase())) {
+                    patchSettings({ fastPathProcesses: [...lines, name].join('\n') })
+                  }
+                }}>{name}</button>
+              ))}
+            </div>
+          )}
         </div>
         <Row label="Раздельный UDP" hint="Игровые и VoIP порты — через группу UDP-FAST.">
           <button className={'toggle' + ((s.splitUdpPolicy ?? true) ? ' on' : '')} onClick={() => patchSettings({ splitUdpPolicy: !(s.splitUdpPolicy ?? true) })} />
@@ -140,7 +172,7 @@ export function Settings() {
             <button className="btn danger" disabled={busy} onClick={() => run(async () => { await api.disarmDeadMan(); await refresh() })}>Снять dead-man</button>
           </div>
         )}
-      </div>
+      </div>}
       <div className="grid cols-2">
         <div className="card">
           <h2>Защита</h2>
@@ -199,7 +231,7 @@ export function Settings() {
             })} />
           </Row>
         </div>
-        <div className="card">
+        {advanced && <div className="card">
           <h2>Туннель</h2>
           <Row label="Включить туннель" hint="Создаётся системный сетевой адаптер. Трафик не ограничивается портами HTTP и SOCKS.">
             <button className={'toggle' + (s.tunEnabled ? ' on' : '')} onClick={() => patchSettings({ tunEnabled: !s.tunEnabled })} />
@@ -224,8 +256,8 @@ export function Settings() {
             <div className="hint">Для туннеля рекомендуется значение 1400.</div>
           </div>
           <div className="field"><label>Адрес туннеля IPv4</label><input value={s.inet4Address} onChange={(e) => patchSettings({ inet4Address: e.target.value })} /></div>
-        </div>
-        <div className="card">
+        </div>}
+        {advanced && <div className="card">
           <h2>Прокси и порты</h2>
           <PortSwap />
           <div style={{ height: 8 }} />
@@ -269,8 +301,8 @@ export function Settings() {
           <div className="field"><label>Отпечаток TLS</label>
             <MenuSelect label="Отпечаток TLS" value={s.globalClientFingerprint} onChange={(value) => patchSettings({ globalClientFingerprint: value })} options={['chrome', 'firefox', 'safari', 'ios', 'android', 'edge', 'random'].map((value) => ({ value, label: value }))} />
           </div>
-        </div>
-        <div className="card">
+        </div>}
+        {advanced && <div className="card">
           <h2>DNS</h2>
           <Row label="Встроенный DNS"><button className={'toggle' + (s.dns.enable ? ' on' : '')} onClick={() => patchSettings({ dns: { ...s.dns, enable: !s.dns.enable } })} /></Row>
           <div className="field"><label>Режим разрешения</label>
@@ -289,13 +321,13 @@ export function Settings() {
           <div className="field"><label>Серверы имён по умолчанию</label>
             <textarea rows={2} value={s.dns.defaultNameserver.join('\n')} onChange={(e) => patchSettings({ dns: { ...s.dns, defaultNameserver: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) } })} />
           </div>
-        </div>
+        </div>}
         <div className="card">
           <h2>Система</h2>
-          <Row label={i.sysProxy} hint={linux ? 'Можно включить вместе с туннелем. Прокси читают программы на GTK, туннель забирает остальной трафик.' : 'Можно включить вместе с туннелем. Прокси нужен программам, которые не идут в сетевой адаптер.'}>
+          <Row label={i.sysProxy} hint={linux ? 'Можно включить вместе с туннелем. Прокси читают GTK, KDE, Cinnamon, MATE и XFCE.' : 'Можно включить вместе с туннелем. Прокси нужен программам, которые не идут в сетевой адаптер.'}>
             <button className={'toggle' + (s.systemProxy ? ' on' : '')} onClick={() => run(async () => { await api.sysproxy(!s.systemProxy); await refresh() })} />
           </Row>
-          <Row label={linux ? 'Автозапуск' : 'Автозапуск Windows'} hint={linux ? 'На Hyprland строка добавляется в автозапуск. На других средах — в автозапуск сессии.' : undefined}><button className={'toggle' + (s.autoStart ? ' on' : '')} onClick={() => patchSettings({ autoStart: !s.autoStart })} /></Row>
+          <Row label={linux ? 'Автозапуск' : 'Автозапуск Windows'} hint={linux ? 'Автозапуск сессии, служба пользователя и строка Hyprland, если она есть.' : undefined}><button className={'toggle' + (s.autoStart ? ' on' : '')} onClick={() => patchSettings({ autoStart: !s.autoStart })} /></Row>
           <Row label="Закрывать в область уведомлений"><button className={'toggle' + (s.closeToTray ? ' on' : '')} onClick={() => patchSettings({ closeToTray: !s.closeToTray })} /></Row>
           <Row label="Запускать свёрнутым"><button className={'toggle' + (s.startHidden ? ' on' : '')} onClick={() => patchSettings({ startHidden: !s.startHidden })} /></Row>
           <div className="field"><label>Адрес проверки задержки</label><input value={s.latencyUrl} onChange={(e) => patchSettings({ latencyUrl: e.target.value })} /></div>

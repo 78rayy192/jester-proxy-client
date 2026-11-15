@@ -1,5 +1,5 @@
 import { useShallow } from 'zustand/react/shallow'
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { usePolling } from '../lib/usePolling'
 import { clash, formatBytes, type ClashConn } from '../lib/api'
 import { t } from '../lib/i18n'
@@ -13,14 +13,19 @@ export function Connections() {
   const [totals, setTotals] = useState({ down: 0, up: 0 })
   const [q, setQ] = useState('')
   const [page, setPage] = useState(0)
+  const seen = useRef('')
 
   usePolling(async () => {
       try {
         const r = await clash.connections()
-        setRows(r.connections || [])
+        const rows = r.connections || []
+        const sig = `${r.downloadTotal}|${r.uploadTotal}|` + rows.map((c) => `${c.id}:${c.download}:${c.upload}`).join(';')
+        if (sig === seen.current) return
+        seen.current = sig
+        setRows(rows)
         setTotals({ down: r.downloadTotal, up: r.uploadTotal })
       } catch { /* ignore */ }
-  }, 2000, !!status?.running)
+  }, 3000, !!status?.running)
 
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase()

@@ -139,6 +139,16 @@ export function formatData(n: number) {
   return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)} ${units[i]}`
 }
 
+export function quotaWarning(used: number, total: number, expireUnix?: number) {
+  if (expireUnix && expireUnix > 0) {
+    const days = (expireUnix * 1000 - Date.now()) / 86400000
+    if (days < 0) return 'Срок подписки истёк.'
+    if (days < 3) return `Подписка заканчивается через ${Math.max(1, Math.ceil(days))} дн.`
+  }
+  if (total > 0 && used / total >= 0.85) return `Израсходовано ${Math.round((used / total) * 100)}% трафика подписки.`
+  return ''
+}
+
 export function formatExpire(unix?: number) {
   if (!unix || unix <= 0) return ''
   const d = new Date(unix * 1000)

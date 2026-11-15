@@ -329,6 +329,11 @@ summary::-webkit-details-marker { display:none; }
 .onboard-dot.done:not(.on) { background:var(--accent-2); }
 
 html[data-theme="light"] { --ok:#217b66; --warn:#936b2d; --danger:#b14160; }
+.toasts { position: fixed; right: 18px; bottom: 18px; z-index: 40; display: grid; gap: 8px; width: min(360px, calc(100% - 36px)); }
+.toast { padding: 12px 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--bg-elev); color: var(--text); text-align: left; box-shadow: var(--shadow); }
+.toast.warn { border-color: color-mix(in srgb, var(--warn) 55%, var(--line)); }
+.proc-pick { display: flex; flex-wrap: wrap; gap: 6px; max-height: 160px; overflow: auto; margin-top: 8px; }
+.proc-pick .btn { padding: 4px 8px; font-size: 11px; }
 @media (max-width:1100px) {
   .shell { --sidebar:68px; --nav-label:none; --nav-kbd:none; --nav-justify:center; --nav-pad:0; --pill-meta:none; --pill-pad:7px; --pill-justify:center; --mark-size:28px; gap:22px; }
   .sidebar { padding:12px 7px 8px; }

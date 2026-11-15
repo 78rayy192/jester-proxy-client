@@ -37,9 +37,11 @@ pub fn device_id_file() -> PathBuf { root().join("device-id") }
 pub fn rules_dir() -> PathBuf { run().join("ruleset") }
 pub fn sysproxy_state() -> PathBuf { root().join("sysproxy.on") }
 pub fn instance_lock() -> PathBuf { root().join("instance.lock") }
+pub fn updates() -> PathBuf { root().join("updates") }
+pub fn good_config() -> PathBuf { run().join("config.good.yaml") }
 
 pub fn ensure() {
-    for dir in [root(), cores(), run(), profiles(), logs(), rules_dir()] {
+    for dir in [root(), cores(), run(), profiles(), logs(), rules_dir(), updates()] {
         let _ = std::fs::create_dir_all(dir);
     }
 }

@@ -86,61 +86,39 @@ impl Core {
         let _ = rules::ensure(&effective);
         let merged = config::merge(&yaml, &effective, &self.secret)?;
         paths::ensure();
-        std::fs::write(paths::runtime_config(), merged).map_err(|e| e.to_string())?;
-        self.stopping.store(true, Ordering::Relaxed);
-        self.stop_inner();
-        self.stopping.store(false, Ordering::Relaxed);
-        #[cfg(unix)]
-        reap_our_cores();
-        #[cfg(windows)]
-        copy_wintun();
+        let previous = std::fs::read_to_string(paths::good_config()).ok();
+        std::fs::write(paths::runtime_config(), &merged).map_err(|e| e.to_string())?;
         #[cfg(unix)]
         if settings.tun_enabled { grant_tun_capability(); }
-        let mut cmd = core_command();
-        cmd.current_dir(paths::run())
-            .arg("-d").arg(paths::run())
-            .arg("-f").arg(paths::runtime_config())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        hide_console(&mut cmd);
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            unsafe {
-                cmd.pre_exec(|| {
-                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-                    if libc::getppid() == 1 { libc::raise(libc::SIGTERM); }
-                    Ok(())
-                });
+        let mut rolled_back = false;
+        if let Err(err) = self.launch(&settings) {
+            let saved = previous.as_deref().filter(|prev| crate::logic::should_restore(&merged, Some(prev)));
+            if let Some(saved) = saved {
+                std::fs::write(paths::runtime_config(), saved).map_err(|e| e.to_string())?;
+                self.launch(&settings).map_err(|_| err)?;
+                rolled_back = true;
+                self.append("новая конфигурация не запустилась, восстановлена предыдущая");
+            } else {
+                return Err(err);
             }
-        }
-        let mut child = cmd.spawn().map_err(|e| format!("Не удалось запустить ядро: {e}"))?;
-        if settings.high_priority { raise_priority(&child); }
-        if let Some(out) = child.stdout.take() { pipe_log(out, self); }
-        if let Some(err) = child.stderr.take() { pipe_log(err, self); }
-        *self.child.lock().expect("child") = Some(child);
-        let mut ready = false;
-        let mut died = false;
-        for _ in 0..40 {
-            if !self.running() { died = true; break; }
-            if core_ready(settings.external_port, &self.secret) { ready = true; break; }
-            std::thread::sleep(std::time::Duration::from_millis(200));
-        }
-        if !ready {
-            if died { std::thread::sleep(std::time::Duration::from_millis(200)); }
-            let detail = self.log_tail(12);
-            self.stopping.store(true, Ordering::Relaxed);
-            self.stop_inner();
-            self.stopping.store(false, Ordering::Relaxed);
-            if died {
-                let line = detail.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("");
-                if !line.is_empty() { return Err(line.to_string()); }
-                return Err("Ядро остановилось при запуске.".into());
-            }
-            return Err("Ядро не ответило на локальный API.".into());
+        } else {
+            let _ = std::fs::write(paths::good_config(), &merged);
         }
         self.note_tun(&settings);
+        if rolled_back {
+            let mut status = self.status(&store.current());
+            status.message = "Новая конфигурация не запустилась. Восстановлена предыдущая.".into();
+            if settings.system_proxy {
+                let _ = sysproxy::set(true, settings.mixed_port);
+            } else {
+                let _ = sysproxy::set(false, 0);
+            }
+            if settings.dead_man_armed {
+                let _ = store.patch(|s| s.dead_man_armed = false);
+            }
+            self.restarts.store(0, Ordering::Relaxed);
+            return Ok(status);
+        }
         if settings.system_proxy {
             let _ = sysproxy::set(true, settings.mixed_port);
         } else {
@@ -176,6 +154,59 @@ impl Core {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+
+    fn launch(&self, settings: &AppSettings) -> Result<(), String> {
+        self.stopping.store(true, Ordering::Relaxed);
+        self.stop_inner();
+        self.stopping.store(false, Ordering::Relaxed);
+        #[cfg(unix)]
+        reap_our_cores();
+        #[cfg(windows)]
+        copy_wintun();
+        let mut cmd = core_command();
+        cmd.current_dir(paths::run())
+            .arg("-d").arg(paths::run())
+            .arg("-f").arg(paths::runtime_config())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        hide_console(&mut cmd);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                    if libc::getppid() == 1 { libc::raise(libc::SIGTERM); }
+                    Ok(())
+                });
+            }
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("Не удалось запустить ядро: {e}"))?;
+        if settings.high_priority { raise_priority(&child); }
+        if let Some(out) = child.stdout.take() { pipe_log(out, self); }
+        if let Some(err) = child.stderr.take() { pipe_log(err, self); }
+        *self.child.lock().expect("child") = Some(child);
+        let mut ready = false;
+        let mut died = false;
+        for _ in 0..40 {
+            if !self.running() { died = true; break; }
+            if core_ready(settings.external_port, &self.secret) { ready = true; break; }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        if ready { return Ok(()); }
+        if died { std::thread::sleep(std::time::Duration::from_millis(200)); }
+        let detail = self.log_tail(12);
+        self.stopping.store(true, Ordering::Relaxed);
+        self.stop_inner();
+        self.stopping.store(false, Ordering::Relaxed);
+        if died {
+            let line = detail.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("");
+            if !line.is_empty() { return Err(line.to_string()); }
+            return Err("Ядро остановилось при запуске.".into());
+        }
+        Err("Ядро не ответило на локальный API.".into())
     }
 
     pub fn on_exit_unexpected(&self) -> bool {
@@ -316,13 +347,25 @@ impl Core {
 fn grant_tun_capability() {
     let exe = paths::mihomo_exe();
     if tun_capability_present(&exe) { return; }
-    let _ = Command::new("sudo")
-        .args(["-n", "setcap", "cap_net_admin,cap_net_bind_service+ep"])
-        .arg(&exe)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    if paths::is_admin() && paths::program_exists("setcap") {
+        let _ = Command::new("setcap")
+            .args(["cap_net_admin,cap_net_bind_service+ep"])
+            .arg(&exe)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if tun_capability_present(&exe) { return; }
+    }
+    if paths::program_exists("sudo") && paths::program_exists("setcap") {
+        let _ = Command::new("sudo")
+            .args(["-n", "setcap", "cap_net_admin,cap_net_bind_service+ep"])
+            .arg(&exe)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
 }
 
 #[cfg(unix)]
@@ -385,7 +428,7 @@ fn urlencoding(s: &str) -> String {
     out
 }
 
-pub fn watch_exit(core: Arc<Core>, settings: Arc<crate::settings::Store>) {
+pub fn watch_exit(core: Arc<Core>, settings: Arc<crate::settings::Store>, runtime: Arc<crate::runtime::Runtime>) {
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(2));
         let exited = {
@@ -401,14 +444,23 @@ pub fn watch_exit(core: Arc<Core>, settings: Arc<crate::settings::Store>) {
         }
         if !core.on_exit_unexpected() { continue; }
         let current = settings.current();
+        runtime.note("warn", "Ядро остановилось.");
+        sysproxy::desktop_notice("Ядро остановилось.");
         if current.dead_man_switch { let _ = sysproxy::set(true, 1); settings.patch(|s| s.dead_man_armed = true).ok(); }
         if !current.auto_restart_core { continue; }
         let n = core.note_restart();
-        if n > 3 { core.append("auto-restart aborted after 3 attempts"); continue; }
+        if n > 3 {
+            core.append("auto-restart aborted after 3 attempts");
+            runtime.note("warn", "Ядро не удалось запустить снова.");
+            continue;
+        }
         std::thread::sleep(std::time::Duration::from_millis(1500 * n as u64));
         match core.start(&settings) {
             Ok(_) => { core.append("auto-restart succeeded"); let _ = settings.patch(|s| s.dead_man_armed = false); }
-            Err(e) => core.append(&format!("auto-restart failed: {e}")),
+            Err(e) => {
+                core.append(&format!("auto-restart failed: {e}"));
+                runtime.note("warn", &format!("Повторный запуск не удался: {e}"));
+            }
         }
     });
 }

@@ -34,7 +34,11 @@ export function Proxies() {
   const [q, setQ] = useState('')
   const [proto, setProto] = useState('all')
   const [sort, setSort] = useState<'default' | 'delay' | 'name'>('delay')
-  const [hideDead, setHideDead] = useState(false)
+  const [hideDead, setHideDead] = useState(() => localStorage.getItem('jester-hide-dead') !== '0')
+  const [shown, setShown] = useState(48)
+  const [fails, setFails] = useState<Record<string, number>>(() => {
+    try { return JSON.parse(localStorage.getItem('jester-node-fails') || '{}') } catch { return {} }
+  })
   const [onlyFav, setOnlyFav] = useState(false)
   const [testing, setTesting] = useState(false)
   const [delays, setDelays] = useState<Record<string, number>>({})
@@ -52,7 +56,8 @@ export function Proxies() {
       if (selected !== settings?.lastSelectedNode)
         await patchSettings({ lastSelectedNode: selected })
     }
-  }).catch(() => setProxies({}))
+    return r.proxies
+  }).catch(() => { setProxies({}); return {} as Record<string, ClashProxy> })
 
   useEffect(() => {
     if (!status?.running) return
@@ -88,6 +93,15 @@ export function Proxies() {
       setDelays((p) => ({ ...p, ...map }))
       if (!Object.keys(map).length) setTestError('Серверы не ответили. Убедитесь, что ядро запущено.')
       await load()
+      setFails((prev) => {
+        const next = { ...prev }
+        for (const [name, delay] of Object.entries(map)) {
+          if (isDead(delay)) next[name] = (next[name] || 0) + 1
+          else if (delay > 0) delete next[name]
+        }
+        localStorage.setItem('jester-node-fails', JSON.stringify(next))
+        return next
+      })
     } catch (e) {
       setTestError(e instanceof Error ? e.message : 'Проверка задержки не выполнена')
     } finally {
@@ -137,7 +151,11 @@ export function Proxies() {
       return hay.includes(query)
     })
   }
-  if (hideDead) names = names.filter((n) => !isDead(delayOf(n)))
+  if (hideDead) names = names.filter((n) => {
+    const delay = delayOf(n)
+    if (delay != null && delay > 0 && delay < 10000) return true
+    return (fails[n] || 0) < 2 && !isDead(delay)
+  })
   if (sort === 'name') names = [...names].sort((a, b) => a.localeCompare(b, 'ru'))
   if (sort === 'delay') names = [...names].sort((a, b) => (delayOf(a) ?? 99999) - (delayOf(b) ?? 99999))
 
@@ -202,13 +220,17 @@ export function Proxies() {
         <button type="button" className={'btn' + (onlyFav ? ' primary' : '')} onClick={() => setOnlyFav((v) => !v)}>
           Избранные
         </button>
-        <button type="button" className={'btn' + (hideDead ? ' primary' : '')} onClick={() => setHideDead((v) => !v)}>
+        <button type="button" className={'btn' + (hideDead ? ' primary' : '')} onClick={() => setHideDead((value) => {
+          const next = !value
+          localStorage.setItem('jester-hide-dead', next ? '1' : '0')
+          return next
+        })}>
           {hideDead ? 'Недоступные скрыты' : 'Скрыть недоступные'}
         </button>
       </div>
 
       <div className="node-grid">
-        {names.map((name) => {
+        {names.slice(0, shown).map((name) => {
           const node = proxies[name]
           const delay = delayOf(name)
           const tone = delayTone(delay)
@@ -245,6 +267,11 @@ export function Proxies() {
           </div>
         )}
       </div>
+      {names.length > shown && (
+        <div className="btn-row" style={{ marginTop: 12 }}>
+          <button type="button" className="btn" onClick={() => setShown((value) => value + 48)}>Ещё {Math.min(48, names.length - shown)}</button>
+        </div>
+      )}
     </div>
   )
 }
