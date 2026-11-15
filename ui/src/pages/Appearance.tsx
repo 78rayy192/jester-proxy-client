@@ -45,7 +45,7 @@ export function AppearancePage() {
               onChange={(e) => set({ backgroundImage: e.target.value, backgroundStyle: e.target.value.trim() ? 'image' : a.backgroundStyle })}
               placeholder="Путь к файлу или адрес https://"
             />
-            <div className="btn-row" style={{ marginTop: 8 }}>
+            {document.documentElement.dataset.platform !== 'android' && <div className="btn-row" style={{ marginTop: 8 }}>
               <button
                 type="button"
                 className="btn"
@@ -56,7 +56,7 @@ export function AppearancePage() {
               >
                 Выбрать файл
               </button>
-            </div>
+            </div>}
           </div>
         </div>
         <div className="card">

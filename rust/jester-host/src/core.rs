@@ -50,7 +50,7 @@ impl Core {
         let running = self.running();
         CoreStatus {
             running,
-            core_installed: paths::mihomo_exe().exists(),
+            core_installed: paths::core_present(),
             wintun_installed: if cfg!(windows) { paths::wintun_dll().exists() } else { true },
             is_admin: paths::is_admin(),
             needs_admin: cfg!(windows) && settings.tun_enabled && !paths::is_admin() && !paths::can_elevate(),
@@ -60,7 +60,7 @@ impl Core {
             app_version: APP_VERSION.into(),
             tun_up: running && self.tun_up.load(Ordering::Relaxed),
             message: if self.downloader.busy() { self.downloader.stage() }
-                else if running && settings.tun_enabled && !self.tun_up.load(Ordering::Relaxed) { "Туннель не поднялся: нет права создать сетевой адаптер. Прокси работает.".into() }
+                else if running && settings.tun_enabled && !self.tun_up.load(Ordering::Relaxed) && !cfg!(target_os = "android") { "Туннель не поднялся: нет права создать сетевой адаптер. Прокси работает.".into() }
                 else if running { "online".into() } else { "idle".into() },
             download_progress: self.downloader.progress(),
             active_profile_id: settings.active_profile_id.clone(),
@@ -70,7 +70,7 @@ impl Core {
 
     pub fn start(&self, store: &crate::settings::Store) -> Result<CoreStatus, String> {
         let settings = store.current();
-        if !paths::mihomo_exe().exists() { return Err("Ядро не установлено.".into()); }
+        if !paths::core_present() { return Err("Ядро не установлено.".into()); }
         if settings.active_profile_id.trim().is_empty() { return Err("Сначала выберите профиль.".into()); }
         #[cfg(windows)]
         if settings.tun_enabled && !paths::is_admin() && !paths::can_elevate() {
@@ -84,13 +84,35 @@ impl Core {
         let _ = rules::ensure(&settings);
         let effective = persona::prepare_profile(&settings, Some(&profile));
         let _ = rules::ensure(&effective);
-        let merged = config::merge(&yaml, &effective, &self.secret)?;
+        #[cfg(target_os = "android")]
+        if let Err(err) = crate::android::prepare(&effective) {
+            return Err(err);
+        }
+        let merged = match config::merge(&yaml, &effective, &self.secret) {
+            Ok(merged) => merged,
+            Err(err) => {
+                #[cfg(target_os = "android")]
+                crate::android::release();
+                return Err(err);
+            }
+        };
         paths::ensure();
         let previous = std::fs::read_to_string(paths::good_config()).ok();
+        #[cfg(target_os = "android")]
+        drop(previous);
         std::fs::write(paths::runtime_config(), &merged).map_err(|e| e.to_string())?;
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "android")))]
         if settings.tun_enabled { grant_tun_capability(); }
+        #[cfg_attr(target_os = "android", allow(unused_mut))]
         let mut rolled_back = false;
+        #[cfg(target_os = "android")]
+        if let Err(err) = self.launch(&settings) {
+            crate::android::release();
+            return Err(err);
+        } else {
+            let _ = std::fs::write(paths::good_config(), &merged);
+        }
+        #[cfg(not(target_os = "android"))]
         if let Err(err) = self.launch(&settings) {
             let saved = previous.as_deref().filter(|prev| crate::logic::should_restore(&merged, Some(prev)));
             if let Some(saved) = saved {
@@ -138,6 +160,8 @@ impl Core {
         self.stopping.store(false, Ordering::Relaxed);
         self.tun_up.store(false, Ordering::Relaxed);
         let _ = sysproxy::set(false, 0);
+        #[cfg(target_os = "android")]
+        crate::android::release();
         self.append("core stopped");
     }
 
@@ -160,11 +184,31 @@ impl Core {
         self.stopping.store(true, Ordering::Relaxed);
         self.stop_inner();
         self.stopping.store(false, Ordering::Relaxed);
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "android")))]
         reap_our_cores();
         #[cfg(windows)]
         copy_wintun();
-        let mut cmd = core_command();
+        let candidates = paths::mihomo_candidates();
+        let mut blocked = Vec::new();
+        let mut saw_file = false;
+        for exe in &candidates {
+            if !exe.is_file() { continue; }
+            saw_file = true;
+            match self.spawn_candidate(exe, settings) {
+                Ok(()) => return Ok(()),
+                Err(err) if exec_blocked(&err) => blocked.push(err),
+                Err(err) => return Err(err),
+            }
+        }
+        if let Some(err) = blocked.pop() {
+            return Err(err);
+        }
+        if saw_file { return Err("Не удалось запустить ядро.".into()); }
+        Err("Ядро не установлено.".into())
+    }
+
+    fn spawn_candidate(&self, exe: &std::path::Path, settings: &AppSettings) -> Result<(), String> {
+        let mut cmd = core_command(exe);
         cmd.current_dir(paths::run())
             .arg("-d").arg(paths::run())
             .arg("-f").arg(paths::runtime_config())
@@ -172,7 +216,7 @@ impl Core {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         hide_console(&mut cmd);
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "android")))]
         {
             use std::os::unix::process::CommandExt;
             unsafe {
@@ -328,22 +372,30 @@ fn raise_priority(child: &Child) {
 
 impl Core {
     fn note_tun(&self, settings: &AppSettings) {
-        if !settings.tun_enabled {
-            self.tun_up.store(false, Ordering::Relaxed);
-            return;
+        #[cfg(target_os = "android")]
+        {
+            let _ = settings;
+            self.tun_up.store(self.running() && crate::android::tun_fd() >= 0, Ordering::Relaxed);
         }
-        let up = (0..6).any(|_| {
-            if tun_listener_up(settings.external_port, &self.secret) { return true; }
-            std::thread::sleep(std::time::Duration::from_millis(150));
-            false
-        });
-        let log = self.log_tail(40);
-        let failed = log.contains("Start TUN listening error") || log.contains("operation not permitted");
-        self.tun_up.store(up && !failed, Ordering::Relaxed);
+        #[cfg(not(target_os = "android"))]
+        {
+            if !settings.tun_enabled {
+                self.tun_up.store(false, Ordering::Relaxed);
+                return;
+            }
+            let up = (0..6).any(|_| {
+                if tun_listener_up(settings.external_port, &self.secret) { return true; }
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                false
+            });
+            let log = self.log_tail(40);
+            let failed = log.contains("Start TUN listening error") || log.contains("operation not permitted");
+            self.tun_up.store(up && !failed, Ordering::Relaxed);
+        }
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 fn grant_tun_capability() {
     let exe = paths::mihomo_exe();
     if tun_capability_present(&exe) { return; }
@@ -368,13 +420,13 @@ fn grant_tun_capability() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 fn tun_capability_present(path: &std::path::Path) -> bool {
     let Ok(out) = Command::new("getcap").arg(path).output() else { return false };
     String::from_utf8_lossy(&out.stdout).contains("cap_net_admin")
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 fn reap_our_cores() {
     let marker = paths::run().display().to_string();
     let Ok(entries) = std::fs::read_dir("/proc") else { return };
@@ -396,10 +448,18 @@ fn reap_our_cores() {
     }
 }
 
-fn core_command() -> Command {
-    let mut cmd = Command::new(paths::mihomo_exe());
+fn core_command(exe: &std::path::Path) -> Command {
+    let mut cmd = Command::new(exe);
     cmd.env("DISABLE_LOOPBACK_DETECTOR", "1");
     cmd
+}
+
+fn exec_blocked(err: &str) -> bool {
+    let text = err.to_ascii_lowercase();
+    text.contains("permission denied")
+        || text.contains("os error 13")
+        || text.contains("eacces")
+        || text.contains("отказано в доступе")
 }
 
 fn hide_console(cmd: &mut Command) {
@@ -447,11 +507,17 @@ pub fn watch_exit(core: Arc<Core>, settings: Arc<crate::settings::Store>, runtim
         runtime.note("warn", "Ядро остановилось.");
         sysproxy::desktop_notice("Ядро остановилось.");
         if current.dead_man_switch { let _ = sysproxy::set(true, 1); settings.patch(|s| s.dead_man_armed = true).ok(); }
-        if !current.auto_restart_core { continue; }
+        if !current.auto_restart_core {
+            #[cfg(target_os = "android")]
+            crate::android::release();
+            continue;
+        }
         let n = core.note_restart();
         if n > 3 {
             core.append("auto-restart aborted after 3 attempts");
             runtime.note("warn", "Ядро не удалось запустить снова.");
+            #[cfg(target_os = "android")]
+            crate::android::release();
             continue;
         }
         std::thread::sleep(std::time::Duration::from_millis(1500 * n as u64));
@@ -460,6 +526,8 @@ pub fn watch_exit(core: Arc<Core>, settings: Arc<crate::settings::Store>, runtim
             Err(e) => {
                 core.append(&format!("auto-restart failed: {e}"));
                 runtime.note("warn", &format!("Повторный запуск не удался: {e}"));
+                #[cfg(target_os = "android")]
+                crate::android::release();
             }
         }
     });

@@ -23,9 +23,10 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
 }
 
 export function Settings() {
-  const { settings, status, busy, patchSettings, run, refresh } = useApp(useShallow(({ settings, status, busy, patchSettings, run, refresh }) => ({ settings, status, busy, patchSettings, run, refresh })))
+  const { settings, status, busy, patchSettings, run, refresh, setPage } = useApp(useShallow(({ settings, status, busy, patchSettings, run, refresh, setPage }) => ({ settings, status, busy, patchSettings, run, refresh, setPage })))
   const i = t(settings?.language || 'ru')
   const linux = status?.os === 'linux'
+  const android = status?.os === 'android'
   const [advanced, setAdvanced] = useState(() => localStorage.getItem('jester-settings-advanced') === '1')
   const [procs, setProcs] = useState<string[] | null>(null)
   const [updateNote, setUpdateNote] = useState('')
@@ -45,6 +46,12 @@ export function Settings() {
           <button className="btn primary" disabled={busy} onClick={() => run(() => api.restart())}>Применить и перезапустить</button>
         </div>
       </div>
+      {android && <div className="phone-sections">
+        <button type="button" onClick={() => setPage('connections')}>Соединения</button>
+        <button type="button" onClick={() => setPage('rules')}>Правила</button>
+        <button type="button" onClick={() => setPage('logs')}>Журнал</button>
+        <button type="button" onClick={() => setPage('appearance')}>Оформление</button>
+      </div>}
       <div className="card" style={{ marginBottom: 16 }}>
         <h2>Служба</h2>
         <Row label="Автообновление подписок" hint="Периодически обновляет все ссылки подписки в фоне.">
@@ -231,7 +238,12 @@ export function Settings() {
             })} />
           </Row>
         </div>
-        {advanced && <div className="card">
+        {advanced && android && <div className="card">
+          <h2>VPN</h2>
+          <p className="hint">На Android один режим — системный VPN. Отдельного туннеля и системного прокси нет. Пока подключение включено, трафик приложений идёт через VPN. Частный DNS в настройках Android может обходить этот режим.</p>
+          <div className="field"><label>MTU</label><input type="number" value={s.mtu} onChange={(e) => num('mtu', e.target.value)} /></div>
+        </div>}
+        {advanced && !android && <div className="card">
           <h2>Туннель</h2>
           <Row label="Включить туннель" hint="Создаётся системный сетевой адаптер. Трафик не ограничивается портами HTTP и SOCKS.">
             <button className={'toggle' + (s.tunEnabled ? ' on' : '')} onClick={() => patchSettings({ tunEnabled: !s.tunEnabled })} />
@@ -304,7 +316,9 @@ export function Settings() {
         </div>}
         {advanced && <div className="card">
           <h2>DNS</h2>
-          <Row label="Встроенный DNS"><button className={'toggle' + (s.dns.enable ? ' on' : '')} onClick={() => patchSettings({ dns: { ...s.dns, enable: !s.dns.enable } })} /></Row>
+          {android
+            ? <p className="hint">На Android встроенный DNS включён всегда: через него идут запросы приложений, пока активен VPN.</p>
+            : <Row label="Встроенный DNS"><button className={'toggle' + (s.dns.enable ? ' on' : '')} onClick={() => patchSettings({ dns: { ...s.dns, enable: !s.dns.enable } })} /></Row>}
           <div className="field"><label>Режим разрешения</label>
             <MenuSelect label="Режим разрешения" value={s.dns.enhancedMode} onChange={(value) => patchSettings({ dns: { ...s.dns, enhancedMode: value } })} options={[
               { value: 'fake-ip', label: 'fake-ip' },
@@ -324,12 +338,13 @@ export function Settings() {
         </div>}
         <div className="card">
           <h2>Система</h2>
-          <Row label={i.sysProxy} hint={linux ? 'Можно включить вместе с туннелем. Прокси читают GTK, KDE, Cinnamon, MATE и XFCE.' : 'Можно включить вместе с туннелем. Прокси нужен программам, которые не идут в сетевой адаптер.'}>
+          {android && <p className="hint">Подключение — это системный VPN. Ядро уже внутри приложения и обновляется вместе с ним.</p>}
+          {!android && <Row label={i.sysProxy} hint={linux ? 'Можно включить вместе с туннелем. Прокси читают GTK, KDE, Cinnamon, MATE и XFCE.' : 'Можно включить вместе с туннелем. Прокси нужен программам, которые не идут в сетевой адаптер.'}>
             <button className={'toggle' + (s.systemProxy ? ' on' : '')} onClick={() => run(async () => { await api.sysproxy(!s.systemProxy); await refresh() })} />
-          </Row>
-          <Row label={linux ? 'Автозапуск' : 'Автозапуск Windows'} hint={linux ? 'Автозапуск сессии, служба пользователя и строка Hyprland, если она есть.' : undefined}><button className={'toggle' + (s.autoStart ? ' on' : '')} onClick={() => patchSettings({ autoStart: !s.autoStart })} /></Row>
-          <Row label="Закрывать в область уведомлений"><button className={'toggle' + (s.closeToTray ? ' on' : '')} onClick={() => patchSettings({ closeToTray: !s.closeToTray })} /></Row>
-          <Row label="Запускать свёрнутым"><button className={'toggle' + (s.startHidden ? ' on' : '')} onClick={() => patchSettings({ startHidden: !s.startHidden })} /></Row>
+          </Row>}
+          {!android && <Row label={linux ? 'Автозапуск' : 'Автозапуск Windows'} hint={linux ? 'Автозапуск сессии, служба пользователя и строка Hyprland, если она есть.' : undefined}><button className={'toggle' + (s.autoStart ? ' on' : '')} onClick={() => patchSettings({ autoStart: !s.autoStart })} /></Row>}
+          {!android && <Row label="Закрывать в область уведомлений"><button className={'toggle' + (s.closeToTray ? ' on' : '')} onClick={() => patchSettings({ closeToTray: !s.closeToTray })} /></Row>}
+          {!android && <Row label="Запускать свёрнутым"><button className={'toggle' + (s.startHidden ? ' on' : '')} onClick={() => patchSettings({ startHidden: !s.startHidden })} /></Row>}
           <div className="field"><label>Адрес проверки задержки</label><input value={s.latencyUrl} onChange={(e) => patchSettings({ latencyUrl: e.target.value })} /></div>
           <div className="field"><label>Таймаут проверки, мс</label><input type="number" value={s.latencyTimeoutMs} onChange={(e) => num('latencyTimeoutMs', e.target.value)} /></div>
           <div className="field"><label>Язык</label>
@@ -338,13 +353,13 @@ export function Settings() {
               { value: 'en', label: 'English' },
             ]} />
           </div>
-          <div className="field"><label>Сборка ядра</label>
+          {!android && <div className="field"><label>Сборка ядра</label>
             <MenuSelect label="Сборка ядра" value={s.coreChannel} onChange={(value) => patchSettings({ coreChannel: value })} options={[
               { value: 'v3', label: 'Оптимизированная (AVX2)' },
               { value: 'amd64', label: 'Стандартная' },
               { value: 'compatible', label: 'Совместимая' },
             ]} />
-          </div>
+          </div>}
         </div>
       </div>
     </div>

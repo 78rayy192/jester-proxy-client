@@ -34,6 +34,21 @@ pub fn get(id: &str) -> Option<ProfileInfo> {
     Some(info)
 }
 
+pub fn node_names(id: &str) -> Result<Vec<String>, String> {
+    let text = std::fs::read_to_string(config_path(id)?).map_err(|e| e.to_string())?;
+    let doc: serde_yaml::Value = serde_yaml::from_str(&text).map_err(|e| e.to_string())?;
+    let Some(list) = doc.get("proxies").and_then(|v| v.as_sequence()) else { return Ok(Vec::new()) };
+    let mut names = Vec::new();
+    for item in list {
+        let Some(name) = item.get("name").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) else { continue };
+        let kind = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if matches!(kind, "Direct" | "Reject" | "RejectDrop" | "Pass" | "Selector" | "URLTest" | "Fallback" | "LoadBalance" | "Relay") { continue; }
+        if name.eq_ignore_ascii_case("DIRECT") || name.eq_ignore_ascii_case("REJECT") { continue; }
+        names.push(name.to_string());
+    }
+    Ok(names)
+}
+
 pub fn config_path(id: &str) -> Result<std::path::PathBuf, String> {
     if !valid_id(id) { return Err("Некорректный id профиля.".into()); }
     Ok(paths::profiles().join(id).join("config.yaml"))

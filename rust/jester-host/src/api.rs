@@ -97,15 +97,7 @@ fn handle(app: &AppState, method: &Method, path: &str, query: &str, body: &Value
             let saved = app.settings.patch(|s| s.appearance = appearance)?;
             Ok(serde_json::to_value(saved.appearance).unwrap())
         }
-        "POST /api/appearance/pick-wallpaper" => {
-            let picked = rfd::FileDialog::new().set_title("Фон окна").add_filter("Изображения", &["jpg", "jpeg", "png", "webp", "gif", "bmp"]).pick_file();
-            let Some(path) = picked else { return Ok(json!({"cancelled": true})); };
-            let saved = app.settings.patch(|s| {
-                s.appearance.background_image = Some(path.display().to_string());
-                s.appearance.background_style = "image".into();
-            })?;
-            Ok(serde_json::to_value(saved.appearance).unwrap())
-        }
+        "POST /api/appearance/pick-wallpaper" => pick_wallpaper(app),
         "GET /api/profiles" => Ok(serde_json::to_value(profiles::list()).unwrap()),
         "POST /api/profiles" => {
             let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("Профиль");
@@ -155,6 +147,8 @@ fn handle(app: &AppState, method: &Method, path: &str, query: &str, body: &Value
         }
         "POST /api/guardian/disarm" => {
             let _ = sysproxy::set(false, 0);
+            #[cfg(target_os = "android")]
+            if !app.core.running() { crate::android::release(); }
             app.settings.patch(|s| s.dead_man_armed = false)?;
             Ok(json!({"ok": true, "deadManArmed": false}))
         }
@@ -165,9 +159,17 @@ fn handle(app: &AppState, method: &Method, path: &str, query: &str, body: &Value
         "POST /api/core/stop" => { app.core.stop(); Ok(serde_json::to_value(app.core.status(&app.settings.current())).unwrap()) }
         "POST /api/core/restart" => Ok(serde_json::to_value(app.core.restart(&app.settings)?).unwrap()),
         "POST /api/core/download" => {
-            let channel = app.settings.current().core_channel;
-            app.core.downloader.install(&channel)?;
-            Ok(serde_json::to_value(app.core.status(&app.settings.current())).unwrap())
+            #[cfg(target_os = "android")]
+            {
+                let _ = body;
+                return Err("Ядро поставляется вместе с приложением. Обновление ставится новым APK.".into());
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                let channel = app.settings.current().core_channel;
+                app.core.downloader.install(&channel)?;
+                Ok(serde_json::to_value(app.core.status(&app.settings.current())).unwrap())
+            }
         }
         "POST /api/core/elevate" => {
             let ok = elevate();
@@ -182,16 +184,21 @@ fn handle(app: &AppState, method: &Method, path: &str, query: &str, body: &Value
         }
         "GET /api/sysproxy" => Ok(json!({"enable": settings.system_proxy, "windowsProxy": sysproxy::is_enabled(), "mixedPort": settings.mixed_port})),
         "POST /api/sysproxy" => {
-            let enable = body.get("enable").and_then(|v| v.as_bool()).unwrap_or(false);
-            if enable {
-                app.settings.patch(|s| s.system_proxy = true)?;
-                sysproxy::set(true, app.settings.current().mixed_port)?;
-            } else {
-                sysproxy::set(false, 0)?;
-                app.settings.patch(|s| s.system_proxy = false)?;
+            #[cfg(target_os = "android")]
+            { return Err("На Android доступен только VPN.".into()); }
+            #[cfg(not(target_os = "android"))]
+            {
+                let enable = body.get("enable").and_then(|v| v.as_bool()).unwrap_or(false);
+                if enable {
+                    app.settings.patch(|s| s.system_proxy = true)?;
+                    sysproxy::set(true, app.settings.current().mixed_port)?;
+                } else {
+                    sysproxy::set(false, 0)?;
+                    app.settings.patch(|s| s.system_proxy = false)?;
+                }
+                let s = app.settings.current();
+                Ok(json!({"enable": s.system_proxy, "tunEnabled": s.tun_enabled, "windowsProxy": sysproxy::is_enabled(), "mixedPort": s.mixed_port}))
             }
-            let s = app.settings.current();
-            Ok(json!({"enable": s.system_proxy, "tunEnabled": s.tun_enabled, "windowsProxy": sysproxy::is_enabled(), "mixedPort": s.mixed_port}))
         }
         "POST /api/proxies/test" => {
             if !app.core.running() { return Err("Ядро не запущено.".into()); }
@@ -231,6 +238,11 @@ fn handle(app: &AppState, method: &Method, path: &str, query: &str, body: &Value
 
 fn profile_routes(app: &AppState, method: &Method, path: &str, body: &Value) -> Result<Value, String> {
     let rest = path.strip_prefix("/api/profiles/").ok_or("not found")?;
+    if method == Method::GET {
+        if let Some(id) = rest.strip_suffix("/nodes") {
+            return Ok(json!({"nodes": profiles::node_names(id)?}));
+        }
+    }
     if method == Method::POST {
         if let Some(id) = rest.strip_suffix("/activate") {
         if profiles::get(id).is_none() { return Err("not found".into()); }
@@ -569,6 +581,24 @@ fn query_map(q: &str) -> std::collections::HashMap<String, String> {
 
 fn send(app: &AppState, cmd: &str) {
     if let Some(tx) = app.win.lock().expect("win").as_ref() { let _ = tx.send(cmd.to_string()); }
+}
+
+fn pick_wallpaper(app: &AppState) -> Result<Value, String> {
+    #[cfg(feature = "desktop")]
+    {
+        let picked = rfd::FileDialog::new().set_title("Фон окна").add_filter("Изображения", &["jpg", "jpeg", "png", "webp", "gif", "bmp"]).pick_file();
+        let Some(path) = picked else { return Ok(json!({"cancelled": true})); };
+        let saved = app.settings.patch(|s| {
+            s.appearance.background_image = Some(path.display().to_string());
+            s.appearance.background_style = "image".into();
+        })?;
+        return Ok(serde_json::to_value(saved.appearance).unwrap());
+    }
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = app;
+        Err("Выбор изображения с диска на этой платформе недоступен.".into())
+    }
 }
 
 fn elevate() -> bool {

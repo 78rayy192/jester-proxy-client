@@ -5,6 +5,7 @@ import { t } from './lib/i18n'
 import { useApp } from './store/app'
 import { Icon, icons } from './components/Icons'
 import { Dashboard } from './pages/Dashboard'
+import { AndroidHome } from './pages/AndroidHome'
 import { Proxies } from './pages/Proxies'
 import { Connections } from './pages/Connections'
 import { Rules } from './pages/Rules'
@@ -100,7 +101,8 @@ function applyTheme() {
   r.setProperty('--glass-highlight', light ? 'rgba(255,255,255,.9)' : 'rgba(255,255,255,.55)')
   r.setProperty('--shadow', light ? '0 18px 40px -24px rgba(39,63,105,.28)' : '0 24px 50px -28px rgba(0,0,0,.55)')
   r.setProperty('--radius', a.radius + 'px')
-  r.setProperty('--blur', a.glass ? Math.round(18 + Math.min(6, Math.max(0, a.glassBlur ?? 6)) * 4) + 'px' : '0px')
+  const android = document.documentElement.dataset.platform === 'android'
+  r.setProperty('--blur', !android && a.glass ? Math.round(18 + Math.min(6, Math.max(0, a.glassBlur ?? 6)) * 4) + 'px' : '0px')
   const font = (value: string) => {
     const clean = (value || 'SF Pro').replace(/["\\\r\n]/g, '')
     if (clean === 'SF Pro') return '"SF Pro Display", "SF Pro Text", "SF Pro", -apple-system, BlinkMacSystemFont, "Segoe UI Variable Display", "Segoe UI", sans-serif'
@@ -164,6 +166,15 @@ export function App() {
   ))
   const [visible, setVisible] = useState(!document.hidden)
   const i = t(settings?.language || 'ru')
+  const android = status?.os === 'android' || document.documentElement.dataset.platform === 'android'
+  const shown = android
+    ? nav.filter(([id]) => id === 'dashboard' || id === 'settings')
+    : nav
+  const secondary = android && !shown.some(([id]) => id === page)
+
+  useEffect(() => {
+    if (status?.os === 'android') document.documentElement.dataset.platform = 'android'
+  }, [status?.os])
 
   useEffect(() => {
     const view = window.chrome?.webview
@@ -318,19 +329,19 @@ export function App() {
           if (st?.running) await api.stop()
           else {
             const r = await api.start()
-            if (r.os !== 'linux' && (r.needsAdmin || r.message === 'admin-required')) await api.elevate()
+            if (r.os === 'windows' && (r.needsAdmin || r.message === 'admin-required')) await api.elevate()
           }
         })
       }
       const idx = Number(e.key)
-      if (idx >= 1 && idx <= nav.length) setPage(nav[idx - 1][0])
+      if (idx >= 1 && idx <= shown.length) setPage(shown[idx - 1][0])
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [run, setPage])
+  }, [android, run, setPage])
 
   const pages = {
-    dashboard: <Dashboard />,
+    dashboard: android ? <AndroidHome /> : <Dashboard />,
     proxies: <Proxies />,
     connections: <Connections />,
     rules: <Rules />,
@@ -366,15 +377,15 @@ export function App() {
           JESTER
         </div>
         <LiveChip />
-        <div className="win-btns">
+        {!android && <div className="win-btns">
           <button type="button" title="Свернуть" aria-label="Свернуть" onMouseDown={(e) => e.stopPropagation()} onClick={() => hostMsg('minimize')}>─</button>
           <button type="button" title="Развернуть" aria-label="Развернуть" onMouseDown={(e) => e.stopPropagation()} onClick={() => hostMsg('maximize')}>▢</button>
           <button type="button" className="close" title="Закрыть" aria-label="Закрыть" onMouseDown={(e) => e.stopPropagation()} onClick={() => hostMsg('close')}>✕</button>
-        </div>
+        </div>}
       </header>
       <div className={'shell' + (settings?.appearance?.sidebar === 'compact' ? ' compact' : '')}>
         <aside className="sidebar">
-          {nav.map(([id, key], n) => (
+          {shown.map(([id, key], n) => (
             <button
               key={id}
               type="button"
@@ -393,6 +404,7 @@ export function App() {
           <div className="grow" />
         </aside>
         <main className="content">
+          {secondary && <button type="button" className="phone-back" onClick={() => setPage('settings')}>Назад к настройкам</button>}
           {error && <div className="card" style={{ marginBottom: 16, borderColor: 'var(--danger)' }}>{error}</div>}
           {pages[page]}
         </main>

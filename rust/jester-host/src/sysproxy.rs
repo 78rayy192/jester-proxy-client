@@ -2,17 +2,27 @@
 use crate::paths;
 
 pub fn set(enable: bool, port: i32) -> Result<(), String> {
-    if enable && !(1..=65535).contains(&port) { return Err("Некорректный порт прокси.".into()); }
-    #[cfg(windows)]
-    { set_windows(enable, port) }
-    #[cfg(not(windows))]
-    { set_linux(enable, port) }
+    #[cfg(target_os = "android")]
+    {
+        let _ = (enable, port);
+        return Ok(());
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        if enable && !(1..=65535).contains(&port) { return Err("Некорректный порт прокси.".into()); }
+        #[cfg(windows)]
+        { return set_windows(enable, port); }
+        #[cfg(not(windows))]
+        { return set_linux(enable, port); }
+    }
 }
 
 pub fn is_enabled() -> bool {
+    #[cfg(target_os = "android")]
+    { return false; }
     #[cfg(windows)]
     { windows_enabled() }
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_os = "android")))]
     { paths::sysproxy_state().exists() }
 }
 
